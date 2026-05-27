@@ -5,7 +5,7 @@ const manifest: PaperclipPluginManifestV1 = {
   id: PLUGIN_ID,
   apiVersion: 1,
   version: PLUGIN_VERSION,
-  displayName: "Telegram Bot",
+  displayName: "Telegram Bot v2",
   description:
     "Bidirectional Telegram integration: push notifications, bot commands, escalation to humans, multi-agent sessions (native + ACP), media pipeline with transcription, custom workflow commands, and proactive suggestion watches.",
   author: "mvanhorn",
@@ -44,10 +44,11 @@ const manifest: PaperclipPluginManifestV1 = {
   ui: {
     slots: [
       {
-        type: "settingsPage",
+        type: "companySettingsPage",
         id: "telegram-settings",
         displayName: "Telegram Settings",
         exportName: "TelegramSettingsPage",
+        routePath: "telegram-settings",
       },
     ],
   },

@@ -2,12 +2,11 @@ import type { PluginContext } from "@paperclipai/plugin-sdk";
 
 export const TELEGRAM_LAST_UPDATE_ID_STATE_KEY = "telegram-last-update-id";
 
-export async function getPersistedTelegramUpdateOffset(ctx: PluginContext): Promise<number> {
-  const saved = await ctx.state.get({
-    scopeKind: "instance",
-    stateKey: TELEGRAM_LAST_UPDATE_ID_STATE_KEY,
-  });
+function companyPollingOffsetStateKey(companyId: string): string {
+  return `telegram.polling.offset.${companyId}`;
+}
 
+function normalizeUpdateId(saved: unknown): number {
   const updateId =
     typeof saved === "number"
       ? saved
@@ -20,6 +19,25 @@ export async function getPersistedTelegramUpdateOffset(ctx: PluginContext): Prom
     : 0;
 }
 
+export async function getPersistedTelegramUpdateOffset(ctx: PluginContext): Promise<number> {
+  const saved = await ctx.state.get({
+    scopeKind: "instance",
+    stateKey: TELEGRAM_LAST_UPDATE_ID_STATE_KEY,
+  });
+  return normalizeUpdateId(saved);
+}
+
+export async function getPersistedTelegramUpdateOffsetForCompany(
+  ctx: PluginContext,
+  companyId: string,
+): Promise<number> {
+  const saved = await ctx.state.get({
+    scopeKind: "instance",
+    stateKey: companyPollingOffsetStateKey(companyId),
+  });
+  return normalizeUpdateId(saved);
+}
+
 export async function persistTelegramUpdateOffset(
   ctx: PluginContext,
   updateId: number,
@@ -30,6 +48,22 @@ export async function persistTelegramUpdateOffset(
     {
       scopeKind: "instance",
       stateKey: TELEGRAM_LAST_UPDATE_ID_STATE_KEY,
+    },
+    updateId,
+  );
+}
+
+export async function persistTelegramUpdateOffsetForCompany(
+  ctx: PluginContext,
+  companyId: string,
+  updateId: number,
+): Promise<void> {
+  if (!Number.isSafeInteger(updateId) || updateId < 0) return;
+
+  await ctx.state.set(
+    {
+      scopeKind: "instance",
+      stateKey: companyPollingOffsetStateKey(companyId),
     },
     updateId,
   );

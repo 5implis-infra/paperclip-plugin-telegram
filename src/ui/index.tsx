@@ -74,13 +74,52 @@ type TelegramRoutingConfig = {
 };
 
 type TelegramConnectionConfig = {
-  telegramBotTokenRef: string;
   paperclipBaseUrl: string;
   paperclipPublicUrl: string;
 };
 
 type TelegramBoardConfig = {
   paperclipBoardApiTokenRef: string;
+};
+
+type TelegramCompanyConfigV2Public = {
+  hasToken: boolean;
+  defaultChatId: string;
+  topicRouting: boolean;
+  maxAgentsPerThread: number;
+  notifyOnIssueCreated: boolean;
+  notifyOnIssueDone: boolean;
+  notifyOnIssueAssigned: boolean;
+  onlyNotifyIfAssignedTo: string;
+  approvalsChatId: string;
+  approvalsTopicId: string;
+  notifyOnApprovalCreated: boolean;
+  onlyNotifyBoardApprovals: boolean;
+  errorsChatId: string;
+  errorsTopicId: string;
+  notifyOnAgentError: boolean;
+  notifyOnAgentRunStarted: boolean;
+  notifyOnAgentRunFinished: boolean;
+  digestChatId: string;
+  digestTopicId: string;
+  digestMode: "off" | "daily" | "bidaily" | "tridaily";
+  dailyDigestTime: string;
+  bidailySecondTime: string;
+  tridailyTimes: string;
+  enableCommands: boolean;
+  enableInbound: boolean;
+  allowedTelegramUserIds: string[];
+  allowedTelegramChatIds: string[];
+  paperclipBoardApiTokenRef: string;
+  transcriptionApiKeyRef: string;
+  briefAgentId: string;
+  briefAgentChatIds: string[];
+  escalationChatId: string;
+  escalationTimeoutMs: number;
+  escalationDefaultAction: "defer" | "auto_reply" | "close";
+  escalationHoldMessage: string;
+  maxSuggestionsPerHourPerCompany: number;
+  watchDeduplicationWindowMs: number;
 };
 
 type TelegramAccessConfig = {
@@ -112,7 +151,7 @@ type PluginConfigResponse = {
   configJson?: Record<string, unknown> | null;
 } | null;
 
-const TELEGRAM_PLUGIN_ID = "paperclip-plugin-telegram";
+const TELEGRAM_PLUGIN_ID = "paperclip-plugin-telegram-v2";
 
 const DEFAULT_ROUTING_CONFIG: TelegramRoutingConfig = {
   defaultChatId: "",
@@ -140,7 +179,6 @@ const DEFAULT_ROUTING_CONFIG: TelegramRoutingConfig = {
 };
 
 const DEFAULT_CONNECTION_CONFIG: TelegramConnectionConfig = {
-  telegramBotTokenRef: "",
   paperclipBaseUrl: "http://localhost:3100",
   paperclipPublicUrl: "",
 };
@@ -284,7 +322,6 @@ function extractRoutingConfig(config: Record<string, unknown>): TelegramRoutingC
 
 function extractConnectionConfig(config: Record<string, unknown>): TelegramConnectionConfig {
   return {
-    telegramBotTokenRef: asString(config.telegramBotTokenRef),
     paperclipBaseUrl: asString(config.paperclipBaseUrl) || DEFAULT_CONNECTION_CONFIG.paperclipBaseUrl,
     paperclipPublicUrl: asString(config.paperclipPublicUrl),
   };
@@ -600,1674 +637,728 @@ async function resolveOrCreateCompanySecret(
 }
 
 export function TelegramSettingsPage({ context }: PluginSettingsPageProps): React.JSX.Element {
-  const boardAccess = usePluginData<BoardAccessRegistration>("board-access.read");
-  const updateBoardAccess = usePluginAction("board-access.update");
-  const [connecting, setConnecting] = useState(false);
-  const [notice, setNotice] = useState<Notice | null>(null);
-  const [routingConfig, setRoutingConfig] = useState<TelegramRoutingConfig>(DEFAULT_ROUTING_CONFIG);
-  const [routingSnapshot, setRoutingSnapshot] = useState<TelegramRoutingConfig>(DEFAULT_ROUTING_CONFIG);
-  const [routingLoading, setRoutingLoading] = useState(true);
-  const [routingSaving, setRoutingSaving] = useState(false);
-  const [routingMessage, setRoutingMessage] = useState<Notice | null>(null);
+  const companyId = context.companyId ?? "";
+
+  // --- Global connection config (URLs only) ---
   const [connectionConfig, setConnectionConfig] = useState<TelegramConnectionConfig>(DEFAULT_CONNECTION_CONFIG);
   const [connectionSnapshot, setConnectionSnapshot] = useState<TelegramConnectionConfig>(DEFAULT_CONNECTION_CONFIG);
   const [connectionLoading, setConnectionLoading] = useState(true);
   const [connectionSaving, setConnectionSaving] = useState(false);
   const [connectionMessage, setConnectionMessage] = useState<Notice | null>(null);
-  const [boardConfig, setBoardConfig] = useState<TelegramBoardConfig>(DEFAULT_BOARD_CONFIG);
-  const [boardSnapshot, setBoardSnapshot] = useState<TelegramBoardConfig>(DEFAULT_BOARD_CONFIG);
-  const [boardConfigLoading, setBoardConfigLoading] = useState(true);
-  const [boardConfigSaving, setBoardConfigSaving] = useState(false);
-  const [boardConfigMessage, setBoardConfigMessage] = useState<Notice | null>(null);
+
+  // --- Company config ---
+  const [companyConfigSaving, setCompanyConfigSaving] = useState(false);
+  const [companyConfigMessage, setCompanyConfigMessage] = useState<Notice | null>(null);
+  const [hasToken, setHasToken] = useState(false);
+  const [tokenInput, setTokenInput] = useState("");
+  const [clearToken, setClearToken] = useState(false);
+
+  // --- Section states ---
+  const [routingConfig, setRoutingConfig] = useState<TelegramRoutingConfig>(DEFAULT_ROUTING_CONFIG);
+  const [routingSnapshot, setRoutingSnapshot] = useState<TelegramRoutingConfig>(DEFAULT_ROUTING_CONFIG);
+  const [routingSaving, setRoutingSaving] = useState(false);
+  const [routingMessage, setRoutingMessage] = useState<Notice | null>(null);
+
   const [accessConfig, setAccessConfig] = useState<TelegramAccessConfig>(DEFAULT_ACCESS_CONFIG);
   const [accessSnapshot, setAccessSnapshot] = useState<TelegramAccessConfig>(DEFAULT_ACCESS_CONFIG);
-  const [accessLoading, setAccessLoading] = useState(true);
   const [accessSaving, setAccessSaving] = useState(false);
   const [accessMessage, setAccessMessage] = useState<Notice | null>(null);
+
   const [mediaConfig, setMediaConfig] = useState<TelegramMediaConfig>(DEFAULT_MEDIA_CONFIG);
   const [mediaSnapshot, setMediaSnapshot] = useState<TelegramMediaConfig>(DEFAULT_MEDIA_CONFIG);
-  const [mediaLoading, setMediaLoading] = useState(true);
   const [mediaSaving, setMediaSaving] = useState(false);
   const [mediaMessage, setMediaMessage] = useState<Notice | null>(null);
+
   const [escalationConfig, setEscalationConfig] = useState<TelegramEscalationConfig>(DEFAULT_ESCALATION_CONFIG);
   const [escalationSnapshot, setEscalationSnapshot] = useState<TelegramEscalationConfig>(DEFAULT_ESCALATION_CONFIG);
-  const [escalationLoading, setEscalationLoading] = useState(true);
   const [escalationSaving, setEscalationSaving] = useState(false);
   const [escalationMessage, setEscalationMessage] = useState<Notice | null>(null);
+
   const [proactiveConfig, setProactiveConfig] = useState<TelegramProactiveConfig>(DEFAULT_PROACTIVE_CONFIG);
   const [proactiveSnapshot, setProactiveSnapshot] = useState<TelegramProactiveConfig>(DEFAULT_PROACTIVE_CONFIG);
-  const [proactiveLoading, setProactiveLoading] = useState(true);
   const [proactiveSaving, setProactiveSaving] = useState(false);
   const [proactiveMessage, setProactiveMessage] = useState<Notice | null>(null);
-  const companyId = context.companyId ?? "";
-  const companyLabel = context.companyPrefix?.trim() || "this company";
-  const configured = Boolean(boardAccess.data?.configured);
-  const identity = boardAccess.data?.identity?.trim() || null;
-  const routingDirty = JSON.stringify(routingConfig) !== JSON.stringify(routingSnapshot);
+
+  // --- Bridge hooks ---
+  const fetchCompanyConfig = usePluginAction("company-config.get");
+  const saveCompanyConfigAction = usePluginAction("company-config.save");
+
+  // --- Load company config ---
+  useEffect(() => {
+    if (!companyId) return;
+    let cancelled = false;
+    async function load(): Promise<void> {
+      try {
+        const data = await fetchCompanyConfig({ companyId });
+        if (cancelled) return;
+        const cfg = (data as { config: TelegramCompanyConfigV2Public | null; hasToken: boolean }).config;
+        setHasToken((data as { hasToken: boolean }).hasToken);
+        if (cfg) {
+          const raw = cfg as unknown as Record<string, unknown>;
+          setRoutingConfig(extractRoutingConfig(raw));
+          setRoutingSnapshot(extractRoutingConfig(raw));
+          setAccessConfig(extractAccessConfig(raw));
+          setAccessSnapshot(extractAccessConfig(raw));
+          setMediaConfig(extractMediaConfig(raw));
+          setMediaSnapshot(extractMediaConfig(raw));
+          setEscalationConfig(extractEscalationConfig(raw));
+          setEscalationSnapshot(extractEscalationConfig(raw));
+          setProactiveConfig(extractProactiveConfig(raw));
+          setProactiveSnapshot(extractProactiveConfig(raw));
+        } else {
+          setRoutingConfig(DEFAULT_ROUTING_CONFIG);
+          setRoutingSnapshot(DEFAULT_ROUTING_CONFIG);
+          setAccessConfig(DEFAULT_ACCESS_CONFIG);
+          setAccessSnapshot(DEFAULT_ACCESS_CONFIG);
+          setMediaConfig(DEFAULT_MEDIA_CONFIG);
+          setMediaSnapshot(DEFAULT_MEDIA_CONFIG);
+          setEscalationConfig(DEFAULT_ESCALATION_CONFIG);
+          setEscalationSnapshot(DEFAULT_ESCALATION_CONFIG);
+          setProactiveConfig(DEFAULT_PROACTIVE_CONFIG);
+          setProactiveSnapshot(DEFAULT_PROACTIVE_CONFIG);
+        }
+        setTokenInput("");
+        setClearToken(false);
+      } catch (err) {
+        if (!cancelled) {
+          setCompanyConfigMessage({ tone: "error", title: "Failed to load company config", text: getErrorMessage(err) });
+        }
+      }
+    }
+    void load();
+    return () => { cancelled = true; };
+  }, [companyId]);
+
+  // --- Load global connection config ---
+  useEffect(() => {
+    let cancelled = false;
+    async function load(): Promise<void> {
+      setConnectionLoading(true);
+      setConnectionMessage(null);
+      try {
+        const cfg = await fetchPluginConfig();
+        if (cancelled) return;
+        const next = extractConnectionConfig(cfg);
+        setConnectionConfig(next);
+        setConnectionSnapshot(next);
+      } catch (error) {
+        if (!cancelled) {
+          setConnectionMessage({ tone: "error", title: "Connection settings could not be loaded", text: getErrorMessage(error) });
+        }
+      } finally {
+        if (!cancelled) setConnectionLoading(false);
+      }
+    }
+    void load();
+    return () => { cancelled = true; };
+  }, []);
+
+  // --- Dirty checks ---
   const connectionDirty = JSON.stringify(connectionConfig) !== JSON.stringify(connectionSnapshot);
-  const boardConfigDirty = JSON.stringify(boardConfig) !== JSON.stringify(boardSnapshot);
+  const routingDirty = JSON.stringify(routingConfig) !== JSON.stringify(routingSnapshot);
   const accessDirty = JSON.stringify(accessConfig) !== JSON.stringify(accessSnapshot);
   const mediaDirty = JSON.stringify(mediaConfig) !== JSON.stringify(mediaSnapshot);
   const escalationDirty = JSON.stringify(escalationConfig) !== JSON.stringify(escalationSnapshot);
   const proactiveDirty = JSON.stringify(proactiveConfig) !== JSON.stringify(proactiveSnapshot);
 
-  useEffect(() => {
-    let cancelled = false;
-
-    async function loadRoutingConfig(): Promise<void> {
-      setRoutingLoading(true);
-      setRoutingMessage(null);
-      try {
-        const config = await fetchPluginConfig();
-        if (cancelled) return;
-        const nextRoutingConfig = extractRoutingConfig(config);
-        setRoutingConfig(nextRoutingConfig);
-        setRoutingSnapshot(nextRoutingConfig);
-      } catch (error) {
-        if (!cancelled) {
-          setRoutingMessage({
-            tone: "error",
-            title: "Routing settings could not be loaded",
-            text: getErrorMessage(error),
-          });
-        }
-      } finally {
-        if (!cancelled) {
-          setRoutingLoading(false);
-        }
-      }
-    }
-
-    void loadRoutingConfig();
-
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  useEffect(() => {
-    let cancelled = false;
-
-    async function loadProactiveConfig(): Promise<void> {
-      setProactiveLoading(true);
-      setProactiveMessage(null);
-      try {
-        const config = await fetchPluginConfig();
-        if (cancelled) return;
-        const nextProactiveConfig = extractProactiveConfig(config);
-        setProactiveConfig(nextProactiveConfig);
-        setProactiveSnapshot(nextProactiveConfig);
-      } catch (error) {
-        if (!cancelled) {
-          setProactiveMessage({
-            tone: "error",
-            title: "Proactive suggestion settings could not be loaded",
-            text: getErrorMessage(error),
-          });
-        }
-      } finally {
-        if (!cancelled) {
-          setProactiveLoading(false);
-        }
-      }
-    }
-
-    void loadProactiveConfig();
-
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  useEffect(() => {
-    let cancelled = false;
-
-    async function loadEscalationConfig(): Promise<void> {
-      setEscalationLoading(true);
-      setEscalationMessage(null);
-      try {
-        const config = await fetchPluginConfig();
-        if (cancelled) return;
-        const nextEscalationConfig = extractEscalationConfig(config);
-        setEscalationConfig(nextEscalationConfig);
-        setEscalationSnapshot(nextEscalationConfig);
-      } catch (error) {
-        if (!cancelled) {
-          setEscalationMessage({
-            tone: "error",
-            title: "Human escalation settings could not be loaded",
-            text: getErrorMessage(error),
-          });
-        }
-      } finally {
-        if (!cancelled) {
-          setEscalationLoading(false);
-        }
-      }
-    }
-
-    void loadEscalationConfig();
-
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  useEffect(() => {
-    let cancelled = false;
-
-    async function loadMediaConfig(): Promise<void> {
-      setMediaLoading(true);
-      setMediaMessage(null);
-      try {
-        const config = await fetchPluginConfig();
-        if (cancelled) return;
-        const nextMediaConfig = extractMediaConfig(config);
-        setMediaConfig(nextMediaConfig);
-        setMediaSnapshot(nextMediaConfig);
-      } catch (error) {
-        if (!cancelled) {
-          setMediaMessage({
-            tone: "error",
-            title: "Media intake settings could not be loaded",
-            text: getErrorMessage(error),
-          });
-        }
-      } finally {
-        if (!cancelled) {
-          setMediaLoading(false);
-        }
-      }
-    }
-
-    void loadMediaConfig();
-
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  useEffect(() => {
-    let cancelled = false;
-
-    async function loadAccessConfig(): Promise<void> {
-      setAccessLoading(true);
-      setAccessMessage(null);
-      try {
-        const config = await fetchPluginConfig();
-        if (cancelled) return;
-        const nextAccessConfig = extractAccessConfig(config);
-        setAccessConfig(nextAccessConfig);
-        setAccessSnapshot(nextAccessConfig);
-      } catch (error) {
-        if (!cancelled) {
-          setAccessMessage({
-            tone: "error",
-            title: "Access settings could not be loaded",
-            text: getErrorMessage(error),
-          });
-        }
-      } finally {
-        if (!cancelled) {
-          setAccessLoading(false);
-        }
-      }
-    }
-
-    void loadAccessConfig();
-
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  useEffect(() => {
-    let cancelled = false;
-
-    async function loadConnectionConfig(): Promise<void> {
-      setConnectionLoading(true);
-      setConnectionMessage(null);
-      try {
-        const config = await fetchPluginConfig();
-        if (cancelled) return;
-        const nextConnectionConfig = extractConnectionConfig(config);
-        setConnectionConfig(nextConnectionConfig);
-        setConnectionSnapshot(nextConnectionConfig);
-      } catch (error) {
-        if (!cancelled) {
-          setConnectionMessage({
-            tone: "error",
-            title: "Connection settings could not be loaded",
-            text: getErrorMessage(error),
-          });
-        }
-      } finally {
-        if (!cancelled) {
-          setConnectionLoading(false);
-        }
-      }
-    }
-
-    void loadConnectionConfig();
-
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  useEffect(() => {
-    let cancelled = false;
-
-    async function loadBoardConfig(): Promise<void> {
-      setBoardConfigLoading(true);
-      setBoardConfigMessage(null);
-      try {
-        const config = await fetchPluginConfig();
-        if (cancelled) return;
-        const nextBoardConfig = extractBoardConfig(config);
-        setBoardConfig(nextBoardConfig);
-        setBoardSnapshot(nextBoardConfig);
-      } catch (error) {
-        if (!cancelled) {
-          setBoardConfigMessage({
-            tone: "error",
-            title: "Board fallback setting could not be loaded",
-            text: getErrorMessage(error),
-          });
-        }
-      } finally {
-        if (!cancelled) {
-          setBoardConfigLoading(false);
-        }
-      }
-    }
-
-    void loadBoardConfig();
-
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  function updateRoutingField<K extends keyof TelegramRoutingConfig>(
-    key: K,
-    value: TelegramRoutingConfig[K],
-  ): void {
-    setRoutingConfig((current) => ({ ...current, [key]: value }));
-    setRoutingMessage(null);
-  }
-
-  function updateBoardField<K extends keyof TelegramBoardConfig>(
-    key: K,
-    value: TelegramBoardConfig[K],
-  ): void {
-    setBoardConfig((current) => ({ ...current, [key]: value }));
-    setBoardConfigMessage(null);
-  }
-
-  function updateAccessField<K extends keyof TelegramAccessConfig>(
-    key: K,
-    value: TelegramAccessConfig[K],
-  ): void {
-    setAccessConfig((current) => ({ ...current, [key]: value }));
-    setAccessMessage(null);
-  }
-
-  function updateConnectionField<K extends keyof TelegramConnectionConfig>(
-    key: K,
-    value: TelegramConnectionConfig[K],
-  ): void {
+  // --- Update helpers ---
+  function updateConnectionField<K extends keyof TelegramConnectionConfig>(key: K, value: TelegramConnectionConfig[K]): void {
     setConnectionConfig((current) => ({ ...current, [key]: value }));
     setConnectionMessage(null);
   }
-
-  function updateMediaField<K extends keyof TelegramMediaConfig>(
-    key: K,
-    value: TelegramMediaConfig[K],
-  ): void {
+  function updateRoutingField<K extends keyof TelegramRoutingConfig>(key: K, value: TelegramRoutingConfig[K]): void {
+    setRoutingConfig((current) => ({ ...current, [key]: value }));
+    setRoutingMessage(null);
+  }
+  function updateAccessField<K extends keyof TelegramAccessConfig>(key: K, value: TelegramAccessConfig[K]): void {
+    setAccessConfig((current) => ({ ...current, [key]: value }));
+    setAccessMessage(null);
+  }
+  function updateMediaField<K extends keyof TelegramMediaConfig>(key: K, value: TelegramMediaConfig[K]): void {
     setMediaConfig((current) => ({ ...current, [key]: value }));
     setMediaMessage(null);
   }
-
-  function updateEscalationField<K extends keyof TelegramEscalationConfig>(
-    key: K,
-    value: TelegramEscalationConfig[K],
-  ): void {
+  function updateEscalationField<K extends keyof TelegramEscalationConfig>(key: K, value: TelegramEscalationConfig[K]): void {
     setEscalationConfig((current) => ({ ...current, [key]: value }));
     setEscalationMessage(null);
   }
-
-  function updateProactiveField<K extends keyof TelegramProactiveConfig>(
-    key: K,
-    value: TelegramProactiveConfig[K],
-  ): void {
+  function updateProactiveField<K extends keyof TelegramProactiveConfig>(key: K, value: TelegramProactiveConfig[K]): void {
     setProactiveConfig((current) => ({ ...current, [key]: value }));
     setProactiveMessage(null);
-  }
-
-  async function handleSaveBoardConfig(): Promise<void> {
-    setBoardConfigSaving(true);
-    setBoardConfigMessage(null);
-    try {
-      const currentConfig = await fetchPluginConfig();
-      const nextConfig = { ...currentConfig, ...boardConfig };
-      await savePluginConfig(nextConfig);
-      setBoardSnapshot(boardConfig);
-      setBoardConfigMessage({
-        tone: "success",
-        title: "Board fallback saved",
-        text: "The connection workflow remains preferred. This secret reference is used only as a manual fallback.",
-      });
-    } catch (error) {
-      setBoardConfigMessage({
-        tone: "error",
-        title: "Board fallback could not be saved",
-        text: getErrorMessage(error),
-      });
-    } finally {
-      setBoardConfigSaving(false);
-    }
-  }
-
-  async function handleSaveAccessConfig(): Promise<void> {
-    setAccessSaving(true);
-    setAccessMessage(null);
-    try {
-      const currentConfig = await fetchPluginConfig();
-      const nextConfig = { ...currentConfig, ...accessConfig };
-      await savePluginConfig(nextConfig);
-      setAccessSnapshot(accessConfig);
-      setAccessMessage({
-        tone: "success",
-        title: "Bot access settings saved",
-        text: "If the worker has already cached Telegram updates, restart the plugin if the new allowlist behavior is not picked up immediately.",
-      });
-    } catch (error) {
-      setAccessMessage({
-        tone: "error",
-        title: "Bot access settings could not be saved",
-        text: getErrorMessage(error),
-      });
-    } finally {
-      setAccessSaving(false);
-    }
-  }
-
-  async function handleSaveRoutingConfig(): Promise<void> {
-    setRoutingSaving(true);
-    setRoutingMessage(null);
-    try {
-      const currentConfig = await fetchPluginConfig();
-      const nextConfig = { ...currentConfig, ...routingConfig };
-      await savePluginConfig(nextConfig);
-      setRoutingSnapshot(routingConfig);
-      setRoutingMessage({
-        tone: "success",
-        title: "Notification routing saved",
-        text: "Refresh the page if another browser tab edited these settings at the same time.",
-      });
-    } catch (error) {
-      setRoutingMessage({
-        tone: "error",
-        title: "Notification routing could not be saved",
-        text: getErrorMessage(error),
-      });
-    } finally {
-      setRoutingSaving(false);
-    }
   }
 
   async function handleSaveConnectionConfig(): Promise<void> {
     setConnectionSaving(true);
     setConnectionMessage(null);
     try {
-      const currentConfig = await fetchPluginConfig();
-      const nextConfig = { ...currentConfig, ...connectionConfig };
-      await savePluginConfig(nextConfig);
+      const current = await fetchPluginConfig();
+      const next = { ...current, ...connectionConfig };
+      await savePluginConfig(next);
       setConnectionSnapshot(connectionConfig);
-      setConnectionMessage({
-        tone: "success",
-        title: "Connection settings saved",
-        text: "These settings control the bot token and the Paperclip URLs used by Telegram messages and approval actions.",
-      });
+      setConnectionMessage({ tone: "success", title: "Connection settings saved", text: "These URLs are used by the Telegram worker." });
     } catch (error) {
-      setConnectionMessage({
-        tone: "error",
-        title: "Connection settings could not be saved",
-        text: getErrorMessage(error),
-      });
+      setConnectionMessage({ tone: "error", title: "Connection settings could not be saved", text: getErrorMessage(error) });
     } finally {
       setConnectionSaving(false);
     }
   }
 
-  async function handleSaveMediaConfig(): Promise<void> {
-    setMediaSaving(true);
-    setMediaMessage(null);
-    try {
-      const currentConfig = await fetchPluginConfig();
-      const nextConfig = { ...currentConfig, ...mediaConfig };
-      await savePluginConfig(nextConfig);
-      setMediaSnapshot(mediaConfig);
-      setMediaMessage({
-        tone: "success",
-        title: "Media intake settings saved",
-        text: "Media in configured intake chats is routed to the Brief Agent. Media in other chats can still go to active topic agent sessions.",
-      });
-    } catch (error) {
-      setMediaMessage({
-        tone: "error",
-        title: "Media intake settings could not be saved",
-        text: getErrorMessage(error),
-      });
-    } finally {
-      setMediaSaving(false);
+  async function handleSaveCompanySection(
+    sectionName: string,
+    patch: Record<string, unknown>,
+    setSaving: (v: boolean) => void,
+    setMessage: (n: Notice | null) => void,
+    setSnapshot: () => void,
+    successTitle: string,
+    errorTitle: string,
+  ): Promise<void> {
+    if (!companyId) {
+      setMessage({ tone: "error", title: "No company context", text: "This settings page requires a company context." });
+      return;
     }
+    setSaving(true);
+    setMessage(null);
+    try {
+      const tokenPatch: Record<string, unknown> = {};
+      if (clearToken) {
+        tokenPatch.telegramBotToken = "";
+      } else if (tokenInput.trim()) {
+        tokenPatch.telegramBotToken = tokenInput.trim();
+      }
+      await saveCompanyConfigAction({
+        companyId,
+        configJson: { ...patch, ...tokenPatch },
+      });
+      setSnapshot();
+      setTokenInput("");
+      setClearToken(false);
+      if (tokenPatch.telegramBotToken === "") setHasToken(false);
+      else if (tokenPatch.telegramBotToken) setHasToken(true);
+      setMessage({ tone: "success", title: successTitle });
+    } catch (error) {
+      setMessage({ tone: "error", title: errorTitle, text: getErrorMessage(error) });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleSaveRoutingConfig(): Promise<void> {
+    await handleSaveCompanySection(
+      "routing",
+      routingConfig as unknown as Record<string, unknown>,
+      setCompanyConfigSaving,
+      setRoutingMessage,
+      () => setRoutingSnapshot(routingConfig),
+      "Notification routing saved",
+      "Notification routing could not be saved",
+    );
+  }
+
+  async function handleSaveAccessConfig(): Promise<void> {
+    await handleSaveCompanySection(
+      "access",
+      accessConfig as unknown as Record<string, unknown>,
+      setCompanyConfigSaving,
+      setAccessMessage,
+      () => setAccessSnapshot(accessConfig),
+      "Bot access settings saved",
+      "Bot access settings could not be saved",
+    );
+  }
+
+  async function handleSaveMediaConfig(): Promise<void> {
+    await handleSaveCompanySection(
+      "media",
+      mediaConfig as unknown as Record<string, unknown>,
+      setCompanyConfigSaving,
+      setMediaMessage,
+      () => setMediaSnapshot(mediaConfig),
+      "Media intake settings saved",
+      "Media intake settings could not be saved",
+    );
   }
 
   async function handleSaveEscalationConfig(): Promise<void> {
-    setEscalationSaving(true);
-    setEscalationMessage(null);
-    try {
-      const currentConfig = await fetchPluginConfig();
-      const nextConfig = { ...currentConfig, ...escalationConfig };
-      await savePluginConfig(nextConfig);
-      setEscalationSnapshot(escalationConfig);
-      setEscalationMessage({
-        tone: "success",
-        title: "Human escalation settings saved",
-        text: "Escalations are sent to the configured Telegram chat when an agent invokes the human handoff tool.",
-      });
-    } catch (error) {
-      setEscalationMessage({
-        tone: "error",
-        title: "Human escalation settings could not be saved",
-        text: getErrorMessage(error),
-      });
-    } finally {
-      setEscalationSaving(false);
-    }
+    await handleSaveCompanySection(
+      "escalation",
+      escalationConfig as unknown as Record<string, unknown>,
+      setCompanyConfigSaving,
+      setEscalationMessage,
+      () => setEscalationSnapshot(escalationConfig),
+      "Human escalation settings saved",
+      "Human escalation settings could not be saved",
+    );
   }
 
   async function handleSaveProactiveConfig(): Promise<void> {
-    setProactiveSaving(true);
-    setProactiveMessage(null);
-    try {
-      const currentConfig = await fetchPluginConfig();
-      const nextConfig = { ...currentConfig, ...proactiveConfig };
-      await savePluginConfig(nextConfig);
-      setProactiveSnapshot(proactiveConfig);
-      setProactiveMessage({
-        tone: "success",
-        title: "Proactive suggestion settings saved",
-        text: "These limits apply when the scheduled watch job evaluates registered watches and sends Telegram suggestions.",
-      });
-    } catch (error) {
-      setProactiveMessage({
-        tone: "error",
-        title: "Proactive suggestion settings could not be saved",
-        text: getErrorMessage(error),
-      });
-    } finally {
-      setProactiveSaving(false);
-    }
+    await handleSaveCompanySection(
+      "proactive",
+      proactiveConfig as unknown as Record<string, unknown>,
+      setCompanyConfigSaving,
+      setProactiveMessage,
+      () => setProactiveSnapshot(proactiveConfig),
+      "Proactive suggestion settings saved",
+      "Proactive suggestion settings could not be saved",
+    );
   }
 
-  async function handleConnectBoardAccess(): Promise<void> {
-    if (!companyId) {
-      setNotice({
-        tone: "error",
-        title: "Open company settings first",
-        text: "Board access tokens are saved as company secrets, so this flow needs a company context.",
-      });
-      return;
-    }
-
-    setConnecting(true);
-    setNotice(null);
-    let approvalWindow: Window | null = null;
-
-    try {
-      if (typeof window !== "undefined") {
-        approvalWindow = window.open("about:blank", "_blank");
-      }
-
-      const challenge = await requestBoardAccessChallenge(companyId);
-      const approvalUrl = resolveCliAuthUrl(challenge.approvalUrl, challenge.approvalPath);
-      if (!approvalUrl) {
-        throw new Error("Paperclip did not return a trusted board approval URL.");
-      }
-
-      if (!approvalWindow && typeof window !== "undefined") {
-        approvalWindow = window.open(approvalUrl, "_blank");
-      } else {
-        approvalWindow?.location.replace(approvalUrl);
-      }
-
-      if (!approvalWindow) {
-        throw new Error("Allow pop-ups for Paperclip, then try connecting board access again.");
-      }
-
-      const boardApiToken = await waitForBoardAccessApproval(challenge);
-      const nextIdentity = await fetchBoardAccessIdentity(boardApiToken);
-      const secretName = `telegram_board_api_${companyId.replace(/[^a-z0-9]+/gi, "_").toLowerCase()}`;
-      const secret = await resolveOrCreateCompanySecret(companyId, secretName, boardApiToken);
-
-      await updateBoardAccess({
-        companyId,
-        paperclipBoardApiTokenRef: secret.id,
-        identity: nextIdentity,
-      });
-      await boardAccess.refresh();
-
-      setNotice({
-        tone: "success",
-        title: nextIdentity ? `Connected as ${nextIdentity}` : "Board access connected",
-        text: "Telegram approval actions can now authenticate with Paperclip.",
-      });
-    } catch (error) {
-      setNotice({
-        tone: "error",
-        title: "Board access could not be connected",
-        text: getErrorMessage(error),
-      });
-    } finally {
-      setConnecting(false);
-      try {
-        approvalWindow?.close();
-      } catch {
-        // Ignore browser close restrictions.
-      }
-    }
+  async function handleSaveToken(): Promise<void> {
+    await handleSaveCompanySection(
+      "token",
+      {},
+      () => {},
+      () => {},
+      () => {},
+      "Bot token saved",
+      "Bot token could not be saved",
+    );
   }
 
+  // --- Render ---
   return (
     <main style={{ display: "grid", gap: 24, padding: 24, color: "#111827" }}>
       <section style={{ display: "grid", gap: 8 }}>
         <h1 style={{ fontSize: 24, lineHeight: "32px", margin: 0 }}>Telegram Bot</h1>
         <p style={{ color: "#6b7280", margin: 0, maxWidth: 760 }}>
-          Configure Telegram connection, access control, notification routing, media intake, escalation, and proactive suggestion behavior.
+          Configure Telegram connection, access control, notification routing, media intake, escalation, and proactive suggestion behavior per company.
         </p>
       </section>
 
-      {notice ? (
-        <div
-          style={{
-            border: `1px solid ${notice.tone === "success" ? "#99f6e4" : "#fecaca"}`,
-            borderRadius: 8,
-            background: notice.tone === "success" ? "#f0fdfa" : "#fef2f2",
-            color: notice.tone === "success" ? "#115e59" : "#991b1b",
-            padding: 14,
-          }}
-        >
-          <strong>{notice.title}</strong>
-          {notice.text ? <p style={{ margin: "6px 0 0" }}>{notice.text}</p> : null}
+      {companyConfigMessage ? (
+        <div style={{ border: "1px solid #fecaca", borderRadius: 8, background: "#fef2f2", color: "#991b1b", padding: 14 }}>
+          <strong>{companyConfigMessage.title}</strong>
+          {companyConfigMessage.text ? <p style={{ margin: "6px 0 0" }}>{companyConfigMessage.text}</p> : null}
         </div>
       ) : null}
 
-      <section
-        style={{
-          border: "1px solid #e5e7eb",
-          borderRadius: 8,
-          display: "grid",
-          gap: 18,
-          padding: 18,
-        }}
-      >
+      {companyId ? (
+        <>
+          {/* Bot Token */}
+          <section style={{ border: "1px solid #e5e7eb", borderRadius: 8, display: "grid", gap: 18, padding: 18 }}>
+            <div style={{ display: "grid", gap: 4 }}>
+              <h2 style={{ fontSize: 18, fontWeight: 700, lineHeight: "28px", margin: 0 }}>Bot Token</h2>
+              <p style={{ color: "#6b7280", margin: 0 }}>
+                The Telegram bot token for this company. Paste a new token to rotate; use the checkbox below to remove it.
+              </p>
+            </div>
+            <div style={{ display: "grid", gap: 12 }}>
+              <label style={{ display: "grid", gap: 5 }}>
+                <span style={{ color: "#4b5563", fontSize: 12, fontWeight: 700 }}>Telegram bot token</span>
+                <input
+                  type="password"
+                  value={tokenInput}
+                  onChange={(event) => setTokenInput(event.currentTarget.value)}
+                  placeholder={hasToken ? "••••••••••••••••" : "Paste new token here"}
+                  disabled={companyConfigSaving}
+                  style={{ border: "1px solid #d1d5db", borderRadius: 8, fontSize: 14, minWidth: 0, padding: "9px 10px" }}
+                />
+                <span style={{ color: "#6b7280", fontSize: 12 }}>
+                  Token configured: {hasToken ? "yes" : "no"}
+                </span>
+              </label>
+              {hasToken ? (
+                <label style={{ color: "#374151", display: "grid", gap: 3, fontSize: 13 }}>
+                  <span style={{ alignItems: "center", display: "flex", gap: 8 }}>
+                    <input
+                      type="checkbox"
+                      checked={clearToken}
+                      onChange={(event) => setClearToken(event.currentTarget.checked)}
+                    />
+                    Clear existing token
+                  </span>
+                  <span style={{ color: "#6b7280", fontSize: 12, marginLeft: 22 }}>
+                    Checking this and saving will remove the stored token and disable the bot for this company.
+                  </span>
+                </label>
+              ) : null}
+            </div>
+            <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+              <button
+                disabled={companyConfigSaving}
+                onClick={() => { setTokenInput(""); setClearToken(false); }}
+                style={{ background: "white", border: "1px solid #d1d5db", borderRadius: 8, color: "#374151", cursor: "pointer", fontWeight: 700, padding: "10px 14px" }}
+                type="button"
+              >
+                Reset
+              </button>
+              <button
+                disabled={companyConfigSaving || (!tokenInput.trim() && !clearToken)}
+                onClick={() => { void handleSaveToken(); }}
+                style={{ background: "#111827", border: 0, borderRadius: 8, color: "white", cursor: "pointer", fontWeight: 700, minWidth: 160, padding: "10px 14px" }}
+                type="button"
+              >
+                {companyConfigSaving ? "Saving..." : "Save token"}
+              </button>
+            </div>
+          </section>
+
+          {/* Notification Routing */}
+          <section style={{ border: "1px solid #e5e7eb", borderRadius: 8, display: "grid", gap: 18, padding: 18 }}>
+            <div style={{ display: "grid", gap: 4 }}>
+              <h2 style={{ fontSize: 18, fontWeight: 700, lineHeight: "28px", margin: 0 }}>Notification Routing & Forum Topics</h2>
+              <p style={{ color: "#6b7280", margin: 0 }}>
+                Grouped operational destinations. Empty Chat IDs fall back to the default route; Topic IDs are optional and only apply inside the matching Telegram forum group.
+              </p>
+            </div>
+            <div style={{ display: "grid", gap: 12 }}>
+              <section style={{ border: "1px solid #e5e7eb", borderRadius: 8, display: "grid", gap: 10, padding: 12 }}>
+                <strong>Default route</strong>
+                <label style={{ display: "grid", gap: 5 }}>
+                  <span style={{ color: "#4b5563", fontSize: 12, fontWeight: 700 }}>Fallback Chat ID</span>
+                  <input
+                    disabled={companyConfigSaving}
+                    onChange={(event) => updateRoutingField("defaultChatId", event.currentTarget.value)}
+                    placeholder="Default chat ID"
+                    style={{ border: "1px solid #d1d5db", borderRadius: 8, fontSize: 14, minWidth: 0, padding: "9px 10px" }}
+                    type="text"
+                    value={routingConfig.defaultChatId}
+                  />
+                  <span style={{ color: "#6b7280", fontSize: 12 }}>Used when a notification type leaves its Chat ID empty and no company-specific chat is connected.</span>
+                </label>
+                <label style={{ color: "#374151", display: "grid", gap: 3, fontSize: 13 }}>
+                  <span style={{ alignItems: "center", display: "flex", gap: 8 }}>
+                    <input
+                      checked={routingConfig.topicRouting}
+                      disabled={companyConfigSaving}
+                      onChange={(event) => updateRoutingField("topicRouting", event.currentTarget.checked)}
+                      type="checkbox"
+                    />
+                    Forum topic routing
+                  </span>
+                  <span style={{ color: "#6b7280", fontSize: 12, marginLeft: 22 }}>Route project-linked notifications to Telegram forum topics mapped with /connect_topic.</span>
+                </label>
+                <label style={{ display: "grid", gap: 5 }}>
+                  <span style={{ color: "#4b5563", fontSize: 12, fontWeight: 700 }}>Max agents per forum topic</span>
+                  <input
+                    disabled={companyConfigSaving}
+                    min={1}
+                    onChange={(event) => updateRoutingField("maxAgentsPerThread", Number(event.currentTarget.value))}
+                    placeholder="3"
+                    style={{ border: "1px solid #d1d5db", borderRadius: 8, fontSize: 14, maxWidth: 180, minWidth: 0, padding: "9px 10px" }}
+                    type="number"
+                    value={routingConfig.maxAgentsPerThread}
+                  />
+                  <span style={{ color: "#6b7280", fontSize: 12 }}>Maximum concurrent agent sessions allowed inside one Telegram forum topic.</span>
+                </label>
+              </section>
+
+              <section style={{ border: "1px solid #e5e7eb", borderRadius: 8, display: "grid", gap: 10, padding: 12 }}>
+                <strong>Issues</strong>
+                <div style={{ display: "grid", gap: 10 }}>
+                  <label style={{ color: "#374151", display: "grid", gap: 3, fontSize: 13 }}>
+                    <span style={{ alignItems: "center", display: "flex", gap: 8 }}>
+                      <input checked={routingConfig.notifyOnIssueCreated} disabled={companyConfigSaving} onChange={(event) => updateRoutingField("notifyOnIssueCreated", event.currentTarget.checked)} type="checkbox" />
+                      Created
+                    </span>
+                    <span style={{ color: "#6b7280", fontSize: 12, marginLeft: 22 }}>Send a Telegram notification when a new issue is created.</span>
+                  </label>
+                  <label style={{ color: "#374151", display: "grid", gap: 3, fontSize: 13 }}>
+                    <span style={{ alignItems: "center", display: "flex", gap: 8 }}>
+                      <input checked={routingConfig.notifyOnIssueDone} disabled={companyConfigSaving} onChange={(event) => updateRoutingField("notifyOnIssueDone", event.currentTarget.checked)} type="checkbox" />
+                      Completed
+                    </span>
+                    <span style={{ color: "#6b7280", fontSize: 12, marginLeft: 22 }}>Send a Telegram notification when an issue is completed.</span>
+                  </label>
+                  <label style={{ color: "#374151", display: "grid", gap: 3, fontSize: 13 }}>
+                    <span style={{ alignItems: "center", display: "flex", gap: 8 }}>
+                      <input checked={routingConfig.notifyOnIssueAssigned} disabled={companyConfigSaving} onChange={(event) => updateRoutingField("notifyOnIssueAssigned", event.currentTarget.checked)} type="checkbox" />
+                      Assignment changes
+                    </span>
+                    <span style={{ color: "#6b7280", fontSize: 12, marginLeft: 22 }}>Send a Telegram notification when an issue assignee changes.</span>
+                  </label>
+                </div>
+                <label style={{ display: "grid", gap: 5 }}>
+                  <span style={{ color: "#4b5563", fontSize: 12, fontWeight: 700 }}>Only when assigned to user ID</span>
+                  <input
+                    disabled={companyConfigSaving}
+                    onChange={(event) => updateRoutingField("onlyNotifyIfAssignedTo", event.currentTarget.value)}
+                    placeholder="Paperclip user ID"
+                    style={{ border: "1px solid #d1d5db", borderRadius: 8, fontSize: 14, minWidth: 0, padding: "9px 10px" }}
+                    type="text"
+                    value={routingConfig.onlyNotifyIfAssignedTo}
+                  />
+                  <span style={{ color: "#6b7280", fontSize: 12 }}>Optional. Restricts assignment-change notifications to issues assigned to this Paperclip user.</span>
+                </label>
+              </section>
+
+              <RoutingRow
+                title="Approvals"
+                chatId={routingConfig.approvalsChatId}
+                topicId={routingConfig.approvalsTopicId}
+                chatPlaceholder="Approvals chat ID"
+                topicPlaceholder="Approvals topic ID"
+                disabled={companyConfigSaving}
+                onChatIdChange={(value) => updateRoutingField("approvalsChatId", value)}
+                onTopicIdChange={(value) => updateRoutingField("approvalsTopicId", value)}
+                chatHelp="Leave empty to use the default route for approval notifications."
+                footer={
+                  <>
+                    <label style={{ color: "#374151", display: "grid", gap: 3, fontSize: 13 }}>
+                      <span style={{ alignItems: "center", display: "flex", gap: 8 }}>
+                        <input checked={routingConfig.notifyOnApprovalCreated} disabled={companyConfigSaving} onChange={(event) => updateRoutingField("notifyOnApprovalCreated", event.currentTarget.checked)} type="checkbox" />
+                        Enabled
+                      </span>
+                      <span style={{ color: "#6b7280", fontSize: 12, marginLeft: 22 }}>Send Telegram notifications when approval requests are created.</span>
+                    </label>
+                    <label style={{ color: "#374151", display: "grid", gap: 3, fontSize: 13 }}>
+                      <span style={{ alignItems: "center", display: "flex", gap: 8 }}>
+                        <input checked={routingConfig.onlyNotifyBoardApprovals} disabled={companyConfigSaving} onChange={(event) => updateRoutingField("onlyNotifyBoardApprovals", event.currentTarget.checked)} type="checkbox" />
+                        Board requests only
+                      </span>
+                      <span style={{ color: "#6b7280", fontSize: 12, marginLeft: 22 }}>Ignore internal approvals and notify only when an agent requests Board approval.</span>
+                    </label>
+                  </>
+                }
+              />
+
+              <RoutingRow
+                title="Errors"
+                chatId={routingConfig.errorsChatId}
+                topicId={routingConfig.errorsTopicId}
+                chatPlaceholder="Errors chat ID"
+                topicPlaceholder="Errors topic ID"
+                disabled={companyConfigSaving}
+                onChatIdChange={(value) => updateRoutingField("errorsChatId", value)}
+                onTopicIdChange={(value) => updateRoutingField("errorsTopicId", value)}
+                chatHelp="Leave empty to use the default route for agent error notifications."
+                footer={
+                  <>
+                    <label style={{ color: "#374151", display: "grid", gap: 3, fontSize: 13 }}>
+                      <span style={{ alignItems: "center", display: "flex", gap: 8 }}>
+                        <input checked={routingConfig.notifyOnAgentError} disabled={companyConfigSaving} onChange={(event) => updateRoutingField("notifyOnAgentError", event.currentTarget.checked)} type="checkbox" />
+                        Errors enabled
+                      </span>
+                      <span style={{ color: "#6b7280", fontSize: 12, marginLeft: 22 }}>Send Telegram notifications when an agent run reports an error.</span>
+                    </label>
+                    <label style={{ color: "#374151", display: "grid", gap: 3, fontSize: 13 }}>
+                      <span style={{ alignItems: "center", display: "flex", gap: 8 }}>
+                        <input checked={routingConfig.notifyOnAgentRunStarted} disabled={companyConfigSaving} onChange={(event) => updateRoutingField("notifyOnAgentRunStarted", event.currentTarget.checked)} type="checkbox" />
+                        Run started
+                      </span>
+                      <span style={{ color: "#6b7280", fontSize: 12, marginLeft: 22 }}>Notify on every agent run start. Off by default - high-frequency on busy instances.</span>
+                    </label>
+                    <label style={{ color: "#374151", display: "grid", gap: 3, fontSize: 13 }}>
+                      <span style={{ alignItems: "center", display: "flex", gap: 8 }}>
+                        <input checked={routingConfig.notifyOnAgentRunFinished} disabled={companyConfigSaving} onChange={(event) => updateRoutingField("notifyOnAgentRunFinished", event.currentTarget.checked)} type="checkbox" />
+                        Run finished
+                      </span>
+                      <span style={{ color: "#6b7280", fontSize: 12, marginLeft: 22 }}>Notify on every agent run completion. Off by default - high-frequency on busy instances.</span>
+                    </label>
+                  </>
+                }
+              />
+
+              <RoutingRow
+                title="Digests"
+                chatId={routingConfig.digestChatId}
+                topicId={routingConfig.digestTopicId}
+                chatPlaceholder="Digest chat ID"
+                topicPlaceholder="Digest topic ID"
+                disabled={companyConfigSaving}
+                onChatIdChange={(value) => updateRoutingField("digestChatId", value)}
+                onTopicIdChange={(value) => updateRoutingField("digestTopicId", value)}
+                chatHelp="Leave empty to use the company/default route for digest notifications."
+                footer={
+                  <div style={{ display: "grid", gap: 10 }}>
+                    <label style={{ display: "grid", gap: 6 }}>
+                      <span style={{ color: "#4b5563", fontSize: 12, fontWeight: 700 }}>Mode</span>
+                      <select
+                        disabled={companyConfigSaving}
+                        onChange={(event) => updateRoutingField("digestMode", event.currentTarget.value as TelegramRoutingConfig["digestMode"])}
+                        style={{ border: "1px solid #d1d5db", borderRadius: 8, fontSize: 14, maxWidth: 280, padding: "9px 10px" }}
+                        value={routingConfig.digestMode}
+                      >
+                        <option value="off">Off</option>
+                        <option value="daily">Daily</option>
+                        <option value="bidaily">Bidaily</option>
+                        <option value="tridaily">Tridaily</option>
+                      </select>
+                      <span style={{ color: "#6b7280", fontSize: 12 }}>Off disables digest notifications. Times are UTC.</span>
+                    </label>
+                    <div style={{ alignItems: "stretch", display: "grid", gap: 10, gridTemplateColumns: "repeat(3, minmax(0, 1fr))" }}>
+                      <label style={{ display: "grid", gap: 5, gridTemplateRows: "auto auto minmax(32px, auto)" }}>
+                        <span style={{ color: "#4b5563", fontSize: 12, fontWeight: 700 }}>Daily time</span>
+                        <input disabled={companyConfigSaving} onChange={(event) => updateRoutingField("dailyDigestTime", event.currentTarget.value)} placeholder="09:00" style={{ border: "1px solid #d1d5db", borderRadius: 8, fontSize: 14, minWidth: 0, padding: "9px 10px" }} type="text" value={routingConfig.dailyDigestTime} />
+                        <span style={{ color: "#6b7280", fontSize: 12, lineHeight: "16px" }}>Used for daily mode and as the first bidaily slot.</span>
+                      </label>
+                      <label style={{ display: "grid", gap: 5, gridTemplateRows: "auto auto minmax(32px, auto)" }}>
+                        <span style={{ color: "#4b5563", fontSize: 12, fontWeight: 700 }}>Bidaily second time</span>
+                        <input disabled={companyConfigSaving} onChange={(event) => updateRoutingField("bidailySecondTime", event.currentTarget.value)} placeholder="17:00" style={{ border: "1px solid #d1d5db", borderRadius: 8, fontSize: 14, minWidth: 0, padding: "9px 10px" }} type="text" value={routingConfig.bidailySecondTime} />
+                        <span style={{ color: "#6b7280", fontSize: 12, lineHeight: "16px" }}>Second send time when bidaily mode is selected.</span>
+                      </label>
+                      <label style={{ display: "grid", gap: 5, gridTemplateRows: "auto auto minmax(32px, auto)" }}>
+                        <span style={{ color: "#4b5563", fontSize: 12, fontWeight: 700 }}>Tridaily times</span>
+                        <input disabled={companyConfigSaving} onChange={(event) => updateRoutingField("tridailyTimes", event.currentTarget.value)} placeholder="07:00,13:00,19:00" style={{ border: "1px solid #d1d5db", borderRadius: 8, fontSize: 14, minWidth: 0, padding: "9px 10px" }} type="text" value={routingConfig.tridailyTimes} />
+                        <span style={{ color: "#6b7280", fontSize: 12, lineHeight: "16px" }}>Three comma-separated UTC times for tridaily mode.</span>
+                      </label>
+                    </div>
+                  </div>
+                }
+              />
+            </div>
+            {routingMessage ? <NoticeBlock notice={routingMessage} /> : null}
+            <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+              <button
+                disabled={companyConfigSaving}
+                onClick={() => { setRoutingConfig(routingSnapshot); setRoutingMessage(null); }}
+                style={{ background: "white", border: "1px solid #d1d5db", borderRadius: 8, color: "#374151", cursor: "pointer", fontWeight: 700, padding: "10px 14px" }}
+                type="button"
+              >
+                Reset
+              </button>
+              <button
+                disabled={companyConfigSaving || !routingDirty}
+                onClick={() => { void handleSaveRoutingConfig(); }}
+                style={{ background: companyConfigSaving || !routingDirty ? "#9ca3af" : "#111827", border: 0, borderRadius: 8, color: "white", cursor: "pointer", fontWeight: 700, minWidth: 160, padding: "10px 14px" }}
+                type="button"
+              >
+                {routingSaving ? "Saving..." : "Save routing"}
+              </button>
+            </div>
+          </section>
+
+          {/* Bot Interaction & Access Control */}
+          <section style={{ border: "1px solid #e5e7eb", borderRadius: 8, display: "grid", gap: 18, padding: 18 }}>
+            <div style={{ display: "grid", gap: 4 }}>
+              <h2 style={{ fontSize: 18, fontWeight: 700, lineHeight: "28px", margin: 0 }}>Bot Interaction & Access Control</h2>
+              <p style={{ color: "#6b7280", margin: 0 }}>Controls who can use the bot interactively. Empty allowlists are permissive; set both user and chat IDs for strict private-group access.</p>
+            </div>
+            <div style={{ display: "grid", gap: 12 }}>
+              <CheckboxField checked={accessConfig.enableCommands} disabled={companyConfigSaving} label="Enable bot commands" onChange={(value) => updateAccessField("enableCommands", value)}>
+                Allow Telegram users to run commands such as /status, /issues, and /agents. Use allowlists when commands are enabled.
+              </CheckboxField>
+              <CheckboxField checked={accessConfig.enableInbound} disabled={companyConfigSaving} label="Enable inbound replies" onChange={(value) => updateAccessField("enableInbound", value)}>
+                Route Telegram replies to Paperclip issue comments when a message replies to a bot notification. Use allowlists when inbound replies are enabled.
+              </CheckboxField>
+              <ArrayField disabled={companyConfigSaving} emptyValueLabel="No user IDs configured" label="Allowed Telegram user IDs" newItemLabel="Add user ID" onChange={(value) => updateAccessField("allowedTelegramUserIds", value)} placeholder="6395513943" value={accessConfig.allowedTelegramUserIds}>
+                Optional. One Telegram user ID per line. Leave empty to allow any user. Applies to commands, inbound replies, media intake, and button callbacks.
+              </ArrayField>
+              <ArrayField disabled={companyConfigSaving} emptyValueLabel="No chat IDs configured" label="Allowed Telegram chat IDs" newItemLabel="Add chat ID" onChange={(value) => updateAccessField("allowedTelegramChatIds", value)} placeholder="-1003800613668" value={accessConfig.allowedTelegramChatIds}>
+                Optional. One chat ID per line. Use private DM IDs and/or private group IDs. If both user and chat allowlists are set, both must match.
+              </ArrayField>
+            </div>
+            {accessMessage ? <NoticeBlock notice={accessMessage} /> : null}
+            <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+              <button disabled={companyConfigSaving} onClick={() => { setAccessConfig(accessSnapshot); setAccessMessage(null); }} style={{ background: "white", border: "1px solid #d1d5db", borderRadius: 8, color: "#374151", cursor: "pointer", fontWeight: 700, padding: "10px 14px" }} type="button">Reset</button>
+              <button disabled={companyConfigSaving || !accessDirty} onClick={() => { void handleSaveAccessConfig(); }} style={{ background: companyConfigSaving || !accessDirty ? "#9ca3af" : "#111827", border: 0, borderRadius: 8, color: "white", cursor: "pointer", fontWeight: 700, minWidth: 160, padding: "10px 14px" }} type="button">{accessSaving ? "Saving..." : "Save access"}</button>
+            </div>
+          </section>
+
+          {/* Media Intake / Brief Agent */}
+          <section style={{ border: "1px solid #e5e7eb", borderRadius: 8, display: "grid", gap: 18, padding: 18 }}>
+            <div style={{ display: "grid", gap: 4 }}>
+              <h2 style={{ fontSize: 18, fontWeight: 700, lineHeight: "28px", margin: 0 }}>Media Intake / Brief Agent</h2>
+              <p style={{ color: "#6b7280", margin: 0 }}>Routes Telegram voice, audio, documents, and photos either to a Brief Agent intake flow or to active agent sessions inside forum topics.</p>
+            </div>
+            <div style={{ display: "grid", gap: 12 }}>
+              <TextField disabled={companyConfigSaving} label="Transcription API key secret ref" onChange={(value) => updateMediaField("transcriptionApiKeyRef", value)} placeholder="OpenAI API key secret UUID" value={mediaConfig.transcriptionApiKeyRef}>
+                Secret UUID for the OpenAI API key used to transcribe voice and audio before routing media to the Brief Agent or an active topic agent session.
+              </TextField>
+              <TextField disabled={companyConfigSaving} label="Brief Agent ID" onChange={(value) => updateMediaField("briefAgentId", value)} placeholder="Paperclip agent ID" value={mediaConfig.briefAgentId}>
+                Agent ID that processes media intake briefs. Leave empty to disable the dedicated Brief Agent intake flow.
+              </TextField>
+              <ArrayField disabled={companyConfigSaving} emptyValueLabel="No intake chat IDs configured" label="Brief Agent intake chat IDs" newItemLabel="Add intake chat ID" onChange={(value) => updateMediaField("briefAgentChatIds", value)} placeholder="-1003800613668" value={mediaConfig.briefAgentChatIds}>
+                Telegram chat IDs where media is routed to the Brief Agent. Media in other chats goes to active agent sessions when a matching forum topic session exists.
+              </ArrayField>
+            </div>
+            {mediaMessage ? <NoticeBlock notice={mediaMessage} /> : null}
+            <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+              <button disabled={companyConfigSaving} onClick={() => { setMediaConfig(mediaSnapshot); setMediaMessage(null); }} style={{ background: "white", border: "1px solid #d1d5db", borderRadius: 8, color: "#374151", cursor: "pointer", fontWeight: 700, padding: "10px 14px" }} type="button">Reset</button>
+              <button disabled={companyConfigSaving || !mediaDirty} onClick={() => { void handleSaveMediaConfig(); }} style={{ background: companyConfigSaving || !mediaDirty ? "#9ca3af" : "#111827", border: 0, borderRadius: 8, color: "white", cursor: "pointer", fontWeight: 700, minWidth: 160, padding: "10px 14px" }} type="button">{mediaSaving ? "Saving..." : "Save media intake"}</button>
+            </div>
+          </section>
+
+          {/* Human Escalation */}
+          <section style={{ border: "1px solid #e5e7eb", borderRadius: 8, display: "grid", gap: 18, padding: 18 }}>
+            <div style={{ display: "grid", gap: 4 }}>
+              <h2 style={{ fontSize: 18, fontWeight: 700, lineHeight: "28px", margin: 0 }}>Human Escalation</h2>
+              <p style={{ color: "#6b7280", margin: 0 }}>Controls where human handoff requests go and what the bot tells the original Telegram user while waiting.</p>
+            </div>
+            <div style={{ display: "grid", gap: 12 }}>
+              <TextField disabled={companyConfigSaving} label="Escalation Chat ID" onChange={(value) => updateEscalationField("escalationChatId", value)} placeholder="-1003800613668" value={escalationConfig.escalationChatId}>
+                Telegram chat ID where escalations are sent for human review. Leave empty to log escalations without forwarding them to Telegram.
+              </TextField>
+              <div style={{ alignItems: "stretch", display: "grid", gap: 10, gridTemplateColumns: "repeat(2, minmax(0, 1fr))" }}>
+                <label style={{ display: "grid", gap: 5, gridTemplateRows: "auto auto minmax(32px, auto)" }}>
+                  <span style={{ color: "#4b5563", fontSize: 12, fontWeight: 700 }}>Escalation timeout (ms)</span>
+                  <input disabled={companyConfigSaving} min={0} onChange={(event) => updateEscalationField("escalationTimeoutMs", Number(event.currentTarget.value))} placeholder="900000" style={{ border: "1px solid #d1d5db", borderRadius: 8, fontSize: 14, minWidth: 0, padding: "9px 10px" }} type="number" value={escalationConfig.escalationTimeoutMs} />
+                  <span style={{ color: "#6b7280", fontSize: 12, lineHeight: "16px" }}>How long to wait for a human response. Default is 900000 ms, or 15 minutes.</span>
+                </label>
+                <label style={{ display: "grid", gap: 5, gridTemplateRows: "auto auto minmax(32px, auto)" }}>
+                  <span style={{ color: "#4b5563", fontSize: 12, fontWeight: 700 }}>Default action on timeout</span>
+                  <select disabled={companyConfigSaving} onChange={(event) => updateEscalationField("escalationDefaultAction", event.currentTarget.value as TelegramEscalationConfig["escalationDefaultAction"])} style={{ border: "1px solid #d1d5db", borderRadius: 8, fontSize: 14, minWidth: 0, padding: "9px 10px" }} value={escalationConfig.escalationDefaultAction}>
+                    <option value="defer">Defer</option>
+                    <option value="auto_reply">Auto reply</option>
+                    <option value="close">Close</option>
+                  </select>
+                  <span style={{ color: "#6b7280", fontSize: 12, lineHeight: "16px" }}>Defer does nothing, auto reply sends the suggested reply, and close ends the escalation path.</span>
+                </label>
+              </div>
+              <TextAreaField disabled={companyConfigSaving} label="Hold message" onChange={(value) => updateEscalationField("escalationHoldMessage", value)} placeholder="Let me check on that - I'll get back to you shortly." rows={3} value={escalationConfig.escalationHoldMessage}>
+                Message sent to the original Telegram user when their conversation is escalated to a human.
+              </TextAreaField>
+            </div>
+            {escalationMessage ? <NoticeBlock notice={escalationMessage} /> : null}
+            <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+              <button disabled={companyConfigSaving} onClick={() => { setEscalationConfig(escalationSnapshot); setEscalationMessage(null); }} style={{ background: "white", border: "1px solid #d1d5db", borderRadius: 8, color: "#374151", cursor: "pointer", fontWeight: 700, padding: "10px 14px" }} type="button">Reset</button>
+              <button disabled={companyConfigSaving || !escalationDirty} onClick={() => { void handleSaveEscalationConfig(); }} style={{ background: companyConfigSaving || !escalationDirty ? "#9ca3af" : "#111827", border: 0, borderRadius: 8, color: "white", cursor: "pointer", fontWeight: 700, minWidth: 160, padding: "10px 14px" }} type="button">{escalationSaving ? "Saving..." : "Save escalation"}</button>
+            </div>
+          </section>
+
+          {/* Proactive Suggestions */}
+          <section style={{ border: "1px solid #e5e7eb", borderRadius: 8, display: "grid", gap: 18, padding: 18 }}>
+            <div style={{ display: "grid", gap: 4 }}>
+              <h2 style={{ fontSize: 18, fontWeight: 700, lineHeight: "28px", margin: 0 }}>Proactive Suggestions</h2>
+              <p style={{ color: "#6b7280", margin: 0 }}>Controls the scheduled watch system that sends Telegram suggestions when registered watches match Paperclip activity.</p>
+            </div>
+            <div style={{ alignItems: "stretch", display: "grid", gap: 10, gridTemplateColumns: "repeat(2, minmax(0, 1fr))" }}>
+              <label style={{ display: "grid", gap: 5, gridTemplateRows: "auto auto minmax(32px, auto)" }}>
+                <span style={{ color: "#4b5563", fontSize: 12, fontWeight: 700 }}>Suggestion rate limit</span>
+                <input disabled={companyConfigSaving} min={0} onChange={(event) => updateProactiveField("maxSuggestionsPerHourPerCompany", Number(event.currentTarget.value))} placeholder="10" style={{ border: "1px solid #d1d5db", borderRadius: 8, fontSize: 14, minWidth: 0, padding: "9px 10px" }} type="number" value={proactiveConfig.maxSuggestionsPerHourPerCompany} />
+                <span style={{ color: "#6b7280", fontSize: 12, lineHeight: "16px" }}>Maximum proactive suggestions sent per company per hour. Set to 0 to suppress watch suggestions without deleting watches.</span>
+              </label>
+              <label style={{ display: "grid", gap: 5, gridTemplateRows: "auto auto minmax(32px, auto)" }}>
+                <span style={{ color: "#4b5563", fontSize: 12, fontWeight: 700 }}>Watch deduplication window (ms)</span>
+                <input disabled={companyConfigSaving} min={0} onChange={(event) => updateProactiveField("watchDeduplicationWindowMs", Number(event.currentTarget.value))} placeholder="86400000" style={{ border: "1px solid #d1d5db", borderRadius: 8, fontSize: 14, minWidth: 0, padding: "9px 10px" }} type="number" value={proactiveConfig.watchDeduplicationWindowMs} />
+                <span style={{ color: "#6b7280", fontSize: 12, lineHeight: "16px" }}>Suppresses repeat suggestions for the same watch/entity pair within this window. Default is 86400000 ms, or 24 hours.</span>
+              </label>
+            </div>
+            <div style={{ background: "#f9fafb", border: "1px solid #e5e7eb", borderRadius: 8, color: "#4b5563", display: "grid", fontSize: 13, gap: 4, padding: 12 }}>
+              <strong style={{ color: "#374151" }}>Watch controls</strong>
+              <span>Individual watches are created by agents through the register_watch tool and stored per company. This section controls global rate limiting and duplicate suppression; it does not create or delete watch definitions.</span>
+            </div>
+            {proactiveMessage ? <NoticeBlock notice={proactiveMessage} /> : null}
+            <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+              <button disabled={companyConfigSaving} onClick={() => { setProactiveConfig(proactiveSnapshot); setProactiveMessage(null); }} style={{ background: "white", border: "1px solid #d1d5db", borderRadius: 8, color: "#374151", cursor: "pointer", fontWeight: 700, padding: "10px 14px" }} type="button">Reset</button>
+              <button disabled={companyConfigSaving || !proactiveDirty} onClick={() => { void handleSaveProactiveConfig(); }} style={{ background: companyConfigSaving || !proactiveDirty ? "#9ca3af" : "#111827", border: 0, borderRadius: 8, color: "white", cursor: "pointer", fontWeight: 700, minWidth: 160, padding: "10px 14px" }} type="button">{proactiveSaving ? "Saving..." : "Save suggestions"}</button>
+            </div>
+          </section>
+        </>
+      ) : null}
+
+      {/* Connection & URLs (global) */}
+      <section style={{ border: "1px solid #e5e7eb", borderRadius: 8, display: "grid", gap: 18, padding: 18 }}>
         <div style={{ display: "grid", gap: 4 }}>
           <h2 style={{ fontSize: 18, fontWeight: 700, lineHeight: "28px", margin: 0 }}>Connection & URLs</h2>
-          <p style={{ color: "#6b7280", margin: 0 }}>
-            Core connection values used by the Telegram worker. Save the bot token as a Paperclip secret and paste its secret UUID here.
-          </p>
+          <p style={{ color: "#6b7280", margin: 0 }}>Global Paperclip URLs used by the Telegram worker for all companies.</p>
         </div>
-
         <div style={{ display: "grid", gap: 12 }}>
-          <TextField
-            disabled={connectionLoading || connectionSaving}
-            label="Telegram bot token secret ref"
-            onChange={(value) => updateConnectionField("telegramBotTokenRef", value)}
-            placeholder="Secret UUID from Paperclip settings"
-            value={connectionConfig.telegramBotTokenRef}
-          >
-            Secret UUID for your Telegram bot token from @BotFather. The plugin resolves this secret before polling Telegram.
-          </TextField>
-          <TextField
-            disabled={connectionLoading || connectionSaving}
-            label="Paperclip API URL"
-            onChange={(value) => updateConnectionField("paperclipBaseUrl", value)}
-            placeholder="http://localhost:3100"
-            value={connectionConfig.paperclipBaseUrl}
-          >
+          <TextField disabled={connectionLoading || connectionSaving} label="Paperclip API URL" onChange={(value) => updateConnectionField("paperclipBaseUrl", value)} placeholder="http://localhost:3100" value={connectionConfig.paperclipBaseUrl}>
             Internal Paperclip API URL used by the plugin for actions such as approvals and comments. Keep localhost for same-server deployments.
           </TextField>
-          <TextField
-            disabled={connectionLoading || connectionSaving}
-            label="Paperclip public URL"
-            onChange={(value) => updateConnectionField("paperclipPublicUrl", value)}
-            placeholder="https://paperclip.example.com"
-            value={connectionConfig.paperclipPublicUrl}
-          >
+          <TextField disabled={connectionLoading || connectionSaving} label="Paperclip public URL" onChange={(value) => updateConnectionField("paperclipPublicUrl", value)} placeholder="https://paperclip.example.com" value={connectionConfig.paperclipPublicUrl}>
             Public URL used in Telegram links. Leave empty to fall back to the API URL.
           </TextField>
         </div>
-
         {connectionMessage ? <NoticeBlock notice={connectionMessage} /> : null}
-
         <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
-          <button
-            disabled={connectionLoading || connectionSaving}
-            onClick={() => {
-              setConnectionConfig(connectionSnapshot);
-              setConnectionMessage(null);
-            }}
-            style={{
-              background: "white",
-              border: "1px solid #d1d5db",
-              borderRadius: 8,
-              color: "#374151",
-              cursor: connectionLoading || connectionSaving ? "not-allowed" : "pointer",
-              fontWeight: 700,
-              padding: "10px 14px",
-            }}
-            type="button"
-          >
-            Reset
-          </button>
-          <button
-            disabled={connectionLoading || connectionSaving || !connectionDirty}
-            onClick={() => {
-              void handleSaveConnectionConfig();
-            }}
-            style={{
-              background: connectionLoading || connectionSaving || !connectionDirty ? "#9ca3af" : "#111827",
-              border: 0,
-              borderRadius: 8,
-              color: "white",
-              cursor: connectionLoading || connectionSaving || !connectionDirty ? "not-allowed" : "pointer",
-              fontWeight: 700,
-              minWidth: 160,
-              padding: "10px 14px",
-            }}
-            type="button"
-          >
-            {connectionSaving ? "Saving..." : "Save connection"}
-          </button>
-        </div>
-      </section>
-
-      <section
-        style={{
-          border: "1px solid #e5e7eb",
-          borderRadius: 8,
-          display: "grid",
-          gap: 18,
-          padding: 18,
-        }}
-      >
-        <div style={{ alignItems: "start", display: "flex", gap: 16, justifyContent: "space-between" }}>
-          <div style={{ display: "grid", gap: 4 }}>
-            <h2 style={{ fontSize: 18, fontWeight: 700, lineHeight: "28px", margin: 0 }}>Board Access Connection</h2>
-            <p style={{ color: "#6b7280", margin: 0 }}>
-              Telegram approval buttons need board access when Paperclip requires authenticated approval mutations.
-            </p>
-          </div>
-          <span
-            style={{
-              background: configured ? "#ccfbf1" : "#f3f4f6",
-              borderRadius: 999,
-              color: configured ? "#0f766e" : "#4b5563",
-              fontSize: 12,
-              fontWeight: 700,
-              padding: "5px 10px",
-              whiteSpace: "nowrap",
-            }}
-          >
-            {connecting ? "Connecting" : configured ? "Connected" : "Not connected"}
-          </span>
-        </div>
-
-        <div
-          style={{
-            alignItems: "center",
-            background: "#f9fafb",
-            border: "1px solid #e5e7eb",
-            borderRadius: 8,
-            display: "flex",
-            gap: 16,
-            justifyContent: "space-between",
-            padding: 14,
-          }}
-        >
-          <div style={{ display: "grid", gap: 4 }}>
-            <strong>
-              {!companyId
-                ? "Open this page inside a company"
-                : configured
-                  ? identity
-                    ? `Connected as ${identity}`
-                    : `Connected for ${companyLabel}`
-                  : `Connect board access for ${companyLabel}`}
-            </strong>
-            <span style={{ color: "#6b7280" }}>
-              {configured
-                ? "The board token is stored as a Paperclip secret; the plugin keeps only the secret reference."
-                : "This opens a Paperclip approval page, then saves the resulting board token as a company secret."}
-            </span>
-          </div>
-          <button
-            disabled={!companyId || connecting || boardAccess.loading}
-            onClick={() => {
-              void handleConnectBoardAccess();
-            }}
-            style={{
-              background: !companyId || connecting || boardAccess.loading ? "#9ca3af" : "#111827",
-              border: 0,
-              borderRadius: 8,
-              color: "white",
-              cursor: !companyId || connecting || boardAccess.loading ? "not-allowed" : "pointer",
-              fontWeight: 700,
-              minWidth: 190,
-              padding: "10px 14px",
-            }}
-            type="button"
-          >
-            {connecting ? "Waiting for approval..." : configured ? "Reconnect board access" : "Connect board access"}
-          </button>
-        </div>
-
-        <div style={{ borderTop: "1px solid #e5e7eb", display: "grid", gap: 12, paddingTop: 14 }}>
-          <TextField
-            disabled={boardConfigLoading || boardConfigSaving}
-            label="Board API token secret ref fallback"
-            onChange={(value) => updateBoardField("paperclipBoardApiTokenRef", value)}
-            placeholder="Optional Paperclip secret UUID"
-            value={boardConfig.paperclipBoardApiTokenRef}
-          >
-            Optional manual fallback for approval buttons and /approve. The Board Access Connection above is preferred because it creates and tracks the company-scoped secret for you.
-          </TextField>
-
-          {boardConfigMessage ? <NoticeBlock notice={boardConfigMessage} /> : null}
-
-          <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
-            <button
-              disabled={boardConfigLoading || boardConfigSaving}
-              onClick={() => {
-                setBoardConfig(boardSnapshot);
-                setBoardConfigMessage(null);
-              }}
-              style={{
-                background: "white",
-                border: "1px solid #d1d5db",
-                borderRadius: 8,
-                color: "#374151",
-                cursor: boardConfigLoading || boardConfigSaving ? "not-allowed" : "pointer",
-                fontWeight: 700,
-                padding: "10px 14px",
-              }}
-              type="button"
-            >
-              Reset
-            </button>
-            <button
-              disabled={boardConfigLoading || boardConfigSaving || !boardConfigDirty}
-              onClick={() => {
-                void handleSaveBoardConfig();
-              }}
-              style={{
-                background: boardConfigLoading || boardConfigSaving || !boardConfigDirty ? "#9ca3af" : "#111827",
-                border: 0,
-                borderRadius: 8,
-                color: "white",
-                cursor: boardConfigLoading || boardConfigSaving || !boardConfigDirty ? "not-allowed" : "pointer",
-                fontWeight: 700,
-                minWidth: 160,
-                padding: "10px 14px",
-              }}
-              type="button"
-            >
-              {boardConfigSaving ? "Saving..." : "Save fallback"}
-            </button>
-          </div>
-        </div>
-
-        {boardAccess.error ? (
-          <p style={{ color: "#991b1b", margin: 0 }}>
-            Could not read board access state: {boardAccess.error.message}
-          </p>
-        ) : null}
-      </section>
-
-      <section
-        style={{
-          border: "1px solid #e5e7eb",
-          borderRadius: 8,
-          display: "grid",
-          gap: 18,
-          padding: 18,
-        }}
-      >
-        <div style={{ display: "grid", gap: 4 }}>
-          <h2 style={{ fontSize: 18, fontWeight: 700, lineHeight: "28px", margin: 0 }}>Bot Interaction & Access Control</h2>
-          <p style={{ color: "#6b7280", margin: 0 }}>
-            Controls who can use the bot interactively. Empty allowlists are permissive; set both user and chat IDs for strict private-group access.
-          </p>
-        </div>
-
-        <div style={{ display: "grid", gap: 12 }}>
-          <CheckboxField
-            checked={accessConfig.enableCommands}
-            disabled={accessLoading || accessSaving}
-            label="Enable bot commands"
-            onChange={(value) => updateAccessField("enableCommands", value)}
-          >
-            Allow Telegram users to run commands such as /status, /issues, and /agents. Use allowlists when commands are enabled.
-          </CheckboxField>
-          <CheckboxField
-            checked={accessConfig.enableInbound}
-            disabled={accessLoading || accessSaving}
-            label="Enable inbound replies"
-            onChange={(value) => updateAccessField("enableInbound", value)}
-          >
-            Route Telegram replies to Paperclip issue comments when a message replies to a bot notification. Use allowlists when inbound replies are enabled.
-          </CheckboxField>
-          <ArrayField
-            disabled={accessLoading || accessSaving}
-            emptyValueLabel="No user IDs configured"
-            label="Allowed Telegram user IDs"
-            newItemLabel="Add user ID"
-            onChange={(value) => updateAccessField("allowedTelegramUserIds", value)}
-            placeholder="6395513943"
-            value={accessConfig.allowedTelegramUserIds}
-          >
-            Optional. One Telegram user ID per line. Leave empty to allow any user. Applies to commands, inbound replies, media intake, and button callbacks.
-          </ArrayField>
-          <ArrayField
-            disabled={accessLoading || accessSaving}
-            emptyValueLabel="No chat IDs configured"
-            label="Allowed Telegram chat IDs"
-            newItemLabel="Add chat ID"
-            onChange={(value) => updateAccessField("allowedTelegramChatIds", value)}
-            placeholder="-1003800613668"
-            value={accessConfig.allowedTelegramChatIds}
-          >
-            Optional. One chat ID per line. Use private DM IDs and/or private group IDs. If both user and chat allowlists are set, both must match.
-          </ArrayField>
-        </div>
-
-        {accessMessage ? <NoticeBlock notice={accessMessage} /> : null}
-
-        <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
-          <button
-            disabled={accessLoading || accessSaving}
-            onClick={() => {
-              setAccessConfig(accessSnapshot);
-              setAccessMessage(null);
-            }}
-            style={{
-              background: "white",
-              border: "1px solid #d1d5db",
-              borderRadius: 8,
-              color: "#374151",
-              cursor: accessLoading || accessSaving ? "not-allowed" : "pointer",
-              fontWeight: 700,
-              padding: "10px 14px",
-            }}
-            type="button"
-          >
-            Reset
-          </button>
-          <button
-            disabled={accessLoading || accessSaving || !accessDirty}
-            onClick={() => {
-              void handleSaveAccessConfig();
-            }}
-            style={{
-              background: accessLoading || accessSaving || !accessDirty ? "#9ca3af" : "#111827",
-              border: 0,
-              borderRadius: 8,
-              color: "white",
-              cursor: accessLoading || accessSaving || !accessDirty ? "not-allowed" : "pointer",
-              fontWeight: 700,
-              minWidth: 160,
-              padding: "10px 14px",
-            }}
-            type="button"
-          >
-            {accessSaving ? "Saving..." : "Save access"}
-          </button>
-        </div>
-      </section>
-
-      <section
-        style={{
-          border: "1px solid #e5e7eb",
-          borderRadius: 8,
-          display: "grid",
-          gap: 18,
-          padding: 18,
-        }}
-      >
-        <div style={{ display: "grid", gap: 4 }}>
-          <h2 style={{ fontSize: 18, fontWeight: 700, lineHeight: "28px", margin: 0 }}>Notification Routing & Forum Topics</h2>
-          <p style={{ color: "#6b7280", margin: 0 }}>
-            Grouped operational destinations. Empty Chat IDs fall back to the default route; Topic IDs are optional and only apply inside the matching Telegram forum group.
-          </p>
-        </div>
-
-        <div style={{ display: "grid", gap: 12 }}>
-          <section
-            style={{
-              border: "1px solid #e5e7eb",
-              borderRadius: 8,
-              display: "grid",
-              gap: 10,
-              padding: 12,
-            }}
-          >
-            <strong>Default route</strong>
-            <label style={{ display: "grid", gap: 5 }}>
-              <span style={{ color: "#4b5563", fontSize: 12, fontWeight: 700 }}>Fallback Chat ID</span>
-              <input
-                disabled={routingLoading || routingSaving}
-                onChange={(event) => updateRoutingField("defaultChatId", event.currentTarget.value)}
-                placeholder="Default chat ID"
-                style={{
-                  border: "1px solid #d1d5db",
-                  borderRadius: 8,
-                  fontSize: 14,
-                  minWidth: 0,
-                  padding: "9px 10px",
-                }}
-                type="text"
-                value={routingConfig.defaultChatId}
-              />
-              <span style={{ color: "#6b7280", fontSize: 12 }}>
-                Used when a notification type leaves its Chat ID empty and no company-specific chat is connected.
-              </span>
-            </label>
-            <label style={{ color: "#374151", display: "grid", gap: 3, fontSize: 13 }}>
-              <span style={{ alignItems: "center", display: "flex", gap: 8 }}>
-                <input
-                  checked={routingConfig.topicRouting}
-                  disabled={routingLoading || routingSaving}
-                  onChange={(event) => updateRoutingField("topicRouting", event.currentTarget.checked)}
-                  type="checkbox"
-                />
-                Forum topic routing
-              </span>
-              <span style={{ color: "#6b7280", fontSize: 12, marginLeft: 22 }}>
-                Route project-linked notifications to Telegram forum topics mapped with /connect_topic.
-              </span>
-            </label>
-            <label style={{ display: "grid", gap: 5 }}>
-              <span style={{ color: "#4b5563", fontSize: 12, fontWeight: 700 }}>Max agents per forum topic</span>
-              <input
-                disabled={routingLoading || routingSaving}
-                min={1}
-                onChange={(event) => updateRoutingField("maxAgentsPerThread", Number(event.currentTarget.value))}
-                placeholder="3"
-                style={{
-                  border: "1px solid #d1d5db",
-                  borderRadius: 8,
-                  fontSize: 14,
-                  maxWidth: 180,
-                  minWidth: 0,
-                  padding: "9px 10px",
-                }}
-                type="number"
-                value={routingConfig.maxAgentsPerThread}
-              />
-              <span style={{ color: "#6b7280", fontSize: 12 }}>
-                Maximum concurrent agent sessions allowed inside one Telegram forum topic. This applies to /acp agent sessions, not notification delivery.
-              </span>
-            </label>
-          </section>
-
-          <section
-            style={{
-              border: "1px solid #e5e7eb",
-              borderRadius: 8,
-              display: "grid",
-              gap: 10,
-              padding: 12,
-            }}
-          >
-            <strong>Issues</strong>
-            <div style={{ display: "grid", gap: 10 }}>
-              <label style={{ color: "#374151", display: "grid", gap: 3, fontSize: 13 }}>
-                <span style={{ alignItems: "center", display: "flex", gap: 8 }}>
-                  <input
-                    checked={routingConfig.notifyOnIssueCreated}
-                    disabled={routingLoading || routingSaving}
-                    onChange={(event) => updateRoutingField("notifyOnIssueCreated", event.currentTarget.checked)}
-                    type="checkbox"
-                  />
-                  Created
-                </span>
-                <span style={{ color: "#6b7280", fontSize: 12, marginLeft: 22 }}>
-                  Send a Telegram notification when a new issue is created.
-                </span>
-              </label>
-              <label style={{ color: "#374151", display: "grid", gap: 3, fontSize: 13 }}>
-                <span style={{ alignItems: "center", display: "flex", gap: 8 }}>
-                  <input
-                    checked={routingConfig.notifyOnIssueDone}
-                    disabled={routingLoading || routingSaving}
-                    onChange={(event) => updateRoutingField("notifyOnIssueDone", event.currentTarget.checked)}
-                    type="checkbox"
-                  />
-                  Completed
-                </span>
-                <span style={{ color: "#6b7280", fontSize: 12, marginLeft: 22 }}>
-                  Send a Telegram notification when an issue is completed.
-                </span>
-              </label>
-              <label style={{ color: "#374151", display: "grid", gap: 3, fontSize: 13 }}>
-                <span style={{ alignItems: "center", display: "flex", gap: 8 }}>
-                  <input
-                    checked={routingConfig.notifyOnIssueAssigned}
-                    disabled={routingLoading || routingSaving}
-                    onChange={(event) => updateRoutingField("notifyOnIssueAssigned", event.currentTarget.checked)}
-                    type="checkbox"
-                  />
-                  Assignment changes
-                </span>
-                <span style={{ color: "#6b7280", fontSize: 12, marginLeft: 22 }}>
-                  Send a Telegram notification when an issue assignee changes.
-                </span>
-              </label>
-            </div>
-            <label style={{ display: "grid", gap: 5 }}>
-              <span style={{ color: "#4b5563", fontSize: 12, fontWeight: 700 }}>Only when assigned to user ID</span>
-              <input
-                disabled={routingLoading || routingSaving}
-                onChange={(event) => updateRoutingField("onlyNotifyIfAssignedTo", event.currentTarget.value)}
-                placeholder="Paperclip user ID"
-                style={{
-                  border: "1px solid #d1d5db",
-                  borderRadius: 8,
-                  fontSize: 14,
-                  minWidth: 0,
-                  padding: "9px 10px",
-                }}
-                type="text"
-                value={routingConfig.onlyNotifyIfAssignedTo}
-              />
-              <span style={{ color: "#6b7280", fontSize: 12 }}>
-                Optional. Restricts assignment-change notifications to issues assigned to this Paperclip user.
-              </span>
-            </label>
-          </section>
-
-          <RoutingRow
-            title="Approvals"
-            chatId={routingConfig.approvalsChatId}
-            topicId={routingConfig.approvalsTopicId}
-            chatPlaceholder="Approvals chat ID"
-            topicPlaceholder="Approvals topic ID"
-            disabled={routingLoading || routingSaving}
-            onChatIdChange={(value) => updateRoutingField("approvalsChatId", value)}
-            onTopicIdChange={(value) => updateRoutingField("approvalsTopicId", value)}
-            chatHelp="Leave empty to use the default route for approval notifications."
-            footer={
-              <>
-                <label style={{ color: "#374151", display: "grid", gap: 3, fontSize: 13 }}>
-                  <span style={{ alignItems: "center", display: "flex", gap: 8 }}>
-                    <input
-                      checked={routingConfig.notifyOnApprovalCreated}
-                      disabled={routingLoading || routingSaving}
-                      onChange={(event) => updateRoutingField("notifyOnApprovalCreated", event.currentTarget.checked)}
-                      type="checkbox"
-                    />
-                    Enabled
-                  </span>
-                  <span style={{ color: "#6b7280", fontSize: 12, marginLeft: 22 }}>
-                    Send Telegram notifications when approval requests are created.
-                  </span>
-                </label>
-                <label style={{ color: "#374151", display: "grid", gap: 3, fontSize: 13 }}>
-                  <span style={{ alignItems: "center", display: "flex", gap: 8 }}>
-                    <input
-                      checked={routingConfig.onlyNotifyBoardApprovals}
-                      disabled={routingLoading || routingSaving}
-                      onChange={(event) => updateRoutingField("onlyNotifyBoardApprovals", event.currentTarget.checked)}
-                      type="checkbox"
-                    />
-                    Board requests only
-                  </span>
-                  <span style={{ color: "#6b7280", fontSize: 12, marginLeft: 22 }}>
-                    Ignore internal approvals and notify only when an agent requests Board approval.
-                  </span>
-                </label>
-              </>
-            }
-          />
-
-          <RoutingRow
-            title="Errors"
-            chatId={routingConfig.errorsChatId}
-            topicId={routingConfig.errorsTopicId}
-            chatPlaceholder="Errors chat ID"
-            topicPlaceholder="Errors topic ID"
-            disabled={routingLoading || routingSaving}
-            onChatIdChange={(value) => updateRoutingField("errorsChatId", value)}
-            onTopicIdChange={(value) => updateRoutingField("errorsTopicId", value)}
-            chatHelp="Leave empty to use the default route for agent error notifications."
-            footer={
-              <>
-                <label style={{ color: "#374151", display: "grid", gap: 3, fontSize: 13 }}>
-                  <span style={{ alignItems: "center", display: "flex", gap: 8 }}>
-                    <input
-                      checked={routingConfig.notifyOnAgentError}
-                      disabled={routingLoading || routingSaving}
-                      onChange={(event) => updateRoutingField("notifyOnAgentError", event.currentTarget.checked)}
-                      type="checkbox"
-                    />
-                    Errors enabled
-                  </span>
-                  <span style={{ color: "#6b7280", fontSize: 12, marginLeft: 22 }}>
-                    Send Telegram notifications when an agent run reports an error.
-                  </span>
-                </label>
-                <label style={{ color: "#374151", display: "grid", gap: 3, fontSize: 13 }}>
-                  <span style={{ alignItems: "center", display: "flex", gap: 8 }}>
-                    <input
-                      checked={routingConfig.notifyOnAgentRunStarted}
-                      disabled={routingLoading || routingSaving}
-                      onChange={(event) => updateRoutingField("notifyOnAgentRunStarted", event.currentTarget.checked)}
-                      type="checkbox"
-                    />
-                    Run started
-                  </span>
-                  <span style={{ color: "#6b7280", fontSize: 12, marginLeft: 22 }}>
-                    Notify on every agent run start. Off by default - high-frequency on busy instances. Routes through the default chat.
-                  </span>
-                </label>
-                <label style={{ color: "#374151", display: "grid", gap: 3, fontSize: 13 }}>
-                  <span style={{ alignItems: "center", display: "flex", gap: 8 }}>
-                    <input
-                      checked={routingConfig.notifyOnAgentRunFinished}
-                      disabled={routingLoading || routingSaving}
-                      onChange={(event) => updateRoutingField("notifyOnAgentRunFinished", event.currentTarget.checked)}
-                      type="checkbox"
-                    />
-                    Run finished
-                  </span>
-                  <span style={{ color: "#6b7280", fontSize: 12, marginLeft: 22 }}>
-                    Notify on every agent run completion. Off by default - high-frequency on busy instances. Routes through the default chat.
-                  </span>
-                </label>
-              </>
-            }
-          />
-
-          <RoutingRow
-            title="Digests"
-            chatId={routingConfig.digestChatId}
-            topicId={routingConfig.digestTopicId}
-            chatPlaceholder="Digest chat ID"
-            topicPlaceholder="Digest topic ID"
-            disabled={routingLoading || routingSaving}
-            onChatIdChange={(value) => updateRoutingField("digestChatId", value)}
-            onTopicIdChange={(value) => updateRoutingField("digestTopicId", value)}
-            chatHelp="Leave empty to use the company/default route for digest notifications."
-            footer={
-              <div style={{ display: "grid", gap: 10 }}>
-                <label style={{ display: "grid", gap: 6 }}>
-                  <span style={{ color: "#4b5563", fontSize: 12, fontWeight: 700 }}>Mode</span>
-                  <select
-                    disabled={routingLoading || routingSaving}
-                    onChange={(event) => updateRoutingField("digestMode", event.currentTarget.value as TelegramRoutingConfig["digestMode"])}
-                    style={{
-                      border: "1px solid #d1d5db",
-                      borderRadius: 8,
-                      fontSize: 14,
-                      maxWidth: 280,
-                      padding: "9px 10px",
-                    }}
-                    value={routingConfig.digestMode}
-                  >
-                    <option value="off">Off</option>
-                    <option value="daily">Daily</option>
-                    <option value="bidaily">Bidaily</option>
-                    <option value="tridaily">Tridaily</option>
-                  </select>
-                  <span style={{ color: "#6b7280", fontSize: 12 }}>
-                    Off disables digest notifications. Times are UTC.
-                  </span>
-                </label>
-                <div style={{ alignItems: "stretch", display: "grid", gap: 10, gridTemplateColumns: "repeat(3, minmax(0, 1fr))" }}>
-                  <label style={{ display: "grid", gap: 5, gridTemplateRows: "auto auto minmax(32px, auto)" }}>
-                    <span style={{ color: "#4b5563", fontSize: 12, fontWeight: 700 }}>Daily time</span>
-                    <input
-                      disabled={routingLoading || routingSaving}
-                      onChange={(event) => updateRoutingField("dailyDigestTime", event.currentTarget.value)}
-                      placeholder="09:00"
-                      style={{
-                        border: "1px solid #d1d5db",
-                        borderRadius: 8,
-                        fontSize: 14,
-                        minWidth: 0,
-                        padding: "9px 10px",
-                      }}
-                      type="text"
-                      value={routingConfig.dailyDigestTime}
-                    />
-                    <span style={{ color: "#6b7280", fontSize: 12, lineHeight: "16px" }}>
-                      Used for daily mode and as the first bidaily slot.
-                    </span>
-                  </label>
-                  <label style={{ display: "grid", gap: 5, gridTemplateRows: "auto auto minmax(32px, auto)" }}>
-                    <span style={{ color: "#4b5563", fontSize: 12, fontWeight: 700 }}>Bidaily second time</span>
-                    <input
-                      disabled={routingLoading || routingSaving}
-                      onChange={(event) => updateRoutingField("bidailySecondTime", event.currentTarget.value)}
-                      placeholder="17:00"
-                      style={{
-                        border: "1px solid #d1d5db",
-                        borderRadius: 8,
-                        fontSize: 14,
-                        minWidth: 0,
-                        padding: "9px 10px",
-                      }}
-                      type="text"
-                      value={routingConfig.bidailySecondTime}
-                    />
-                    <span style={{ color: "#6b7280", fontSize: 12, lineHeight: "16px" }}>
-                      Second send time when bidaily mode is selected.
-                    </span>
-                  </label>
-                  <label style={{ display: "grid", gap: 5, gridTemplateRows: "auto auto minmax(32px, auto)" }}>
-                    <span style={{ color: "#4b5563", fontSize: 12, fontWeight: 700 }}>Tridaily times</span>
-                    <input
-                      disabled={routingLoading || routingSaving}
-                      onChange={(event) => updateRoutingField("tridailyTimes", event.currentTarget.value)}
-                      placeholder="07:00,13:00,19:00"
-                      style={{
-                        border: "1px solid #d1d5db",
-                        borderRadius: 8,
-                        fontSize: 14,
-                        minWidth: 0,
-                        padding: "9px 10px",
-                      }}
-                      type="text"
-                      value={routingConfig.tridailyTimes}
-                    />
-                    <span style={{ color: "#6b7280", fontSize: 12, lineHeight: "16px" }}>
-                      Three comma-separated UTC times for tridaily mode.
-                    </span>
-                  </label>
-                </div>
-              </div>
-            }
-          />
-        </div>
-
-        {routingMessage ? <NoticeBlock notice={routingMessage} /> : null}
-
-        <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
-          <button
-            disabled={routingLoading || routingSaving}
-            onClick={() => {
-              setRoutingConfig(routingSnapshot);
-              setRoutingMessage(null);
-            }}
-            style={{
-              background: "white",
-              border: "1px solid #d1d5db",
-              borderRadius: 8,
-              color: "#374151",
-              cursor: routingLoading || routingSaving ? "not-allowed" : "pointer",
-              fontWeight: 700,
-              padding: "10px 14px",
-            }}
-            type="button"
-          >
-            Reset
-          </button>
-          <button
-            disabled={routingLoading || routingSaving || !routingDirty}
-            onClick={() => {
-              void handleSaveRoutingConfig();
-            }}
-            style={{
-              background: routingLoading || routingSaving || !routingDirty ? "#9ca3af" : "#111827",
-              border: 0,
-              borderRadius: 8,
-              color: "white",
-              cursor: routingLoading || routingSaving || !routingDirty ? "not-allowed" : "pointer",
-              fontWeight: 700,
-              minWidth: 160,
-              padding: "10px 14px",
-            }}
-            type="button"
-          >
-            {routingSaving ? "Saving..." : "Save routing"}
-          </button>
-        </div>
-      </section>
-
-      <section
-        style={{
-          border: "1px solid #e5e7eb",
-          borderRadius: 8,
-          display: "grid",
-          gap: 18,
-          padding: 18,
-        }}
-      >
-        <div style={{ display: "grid", gap: 4 }}>
-          <h2 style={{ fontSize: 18, fontWeight: 700, lineHeight: "28px", margin: 0 }}>Media Intake / Brief Agent</h2>
-          <p style={{ color: "#6b7280", margin: 0 }}>
-            Routes Telegram voice, audio, documents, and photos either to a Brief Agent intake flow or to active agent sessions inside forum topics.
-          </p>
-        </div>
-
-        <div style={{ display: "grid", gap: 12 }}>
-          <TextField
-            disabled={mediaLoading || mediaSaving}
-            label="Transcription API key secret ref"
-            onChange={(value) => updateMediaField("transcriptionApiKeyRef", value)}
-            placeholder="OpenAI API key secret UUID"
-            value={mediaConfig.transcriptionApiKeyRef}
-          >
-            Secret UUID for the OpenAI API key used to transcribe voice and audio before routing media to the Brief Agent or an active topic agent session.
-          </TextField>
-          <TextField
-            disabled={mediaLoading || mediaSaving}
-            label="Brief Agent ID"
-            onChange={(value) => updateMediaField("briefAgentId", value)}
-            placeholder="Paperclip agent ID"
-            value={mediaConfig.briefAgentId}
-          >
-            Agent ID that processes media intake briefs. Leave empty to disable the dedicated Brief Agent intake flow.
-          </TextField>
-          <ArrayField
-            disabled={mediaLoading || mediaSaving}
-            emptyValueLabel="No intake chat IDs configured"
-            label="Brief Agent intake chat IDs"
-            newItemLabel="Add intake chat ID"
-            onChange={(value) => updateMediaField("briefAgentChatIds", value)}
-            placeholder="-1003800613668"
-            value={mediaConfig.briefAgentChatIds}
-          >
-            Telegram chat IDs where media is routed to the Brief Agent. Media in other chats goes to active agent sessions when a matching forum topic session exists.
-          </ArrayField>
-        </div>
-
-        {mediaMessage ? <NoticeBlock notice={mediaMessage} /> : null}
-
-        <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
-          <button
-            disabled={mediaLoading || mediaSaving}
-            onClick={() => {
-              setMediaConfig(mediaSnapshot);
-              setMediaMessage(null);
-            }}
-            style={{
-              background: "white",
-              border: "1px solid #d1d5db",
-              borderRadius: 8,
-              color: "#374151",
-              cursor: mediaLoading || mediaSaving ? "not-allowed" : "pointer",
-              fontWeight: 700,
-              padding: "10px 14px",
-            }}
-            type="button"
-          >
-            Reset
-          </button>
-          <button
-            disabled={mediaLoading || mediaSaving || !mediaDirty}
-            onClick={() => {
-              void handleSaveMediaConfig();
-            }}
-            style={{
-              background: mediaLoading || mediaSaving || !mediaDirty ? "#9ca3af" : "#111827",
-              border: 0,
-              borderRadius: 8,
-              color: "white",
-              cursor: mediaLoading || mediaSaving || !mediaDirty ? "not-allowed" : "pointer",
-              fontWeight: 700,
-              minWidth: 160,
-              padding: "10px 14px",
-            }}
-            type="button"
-          >
-            {mediaSaving ? "Saving..." : "Save media intake"}
-          </button>
-        </div>
-      </section>
-
-      <section
-        style={{
-          border: "1px solid #e5e7eb",
-          borderRadius: 8,
-          display: "grid",
-          gap: 18,
-          padding: 18,
-        }}
-      >
-        <div style={{ display: "grid", gap: 4 }}>
-          <h2 style={{ fontSize: 18, fontWeight: 700, lineHeight: "28px", margin: 0 }}>Human Escalation</h2>
-          <p style={{ color: "#6b7280", margin: 0 }}>
-            Controls where human handoff requests go and what the bot tells the original Telegram user while waiting.
-          </p>
-        </div>
-
-        <div style={{ display: "grid", gap: 12 }}>
-          <TextField
-            disabled={escalationLoading || escalationSaving}
-            label="Escalation Chat ID"
-            onChange={(value) => updateEscalationField("escalationChatId", value)}
-            placeholder="-1003800613668"
-            value={escalationConfig.escalationChatId}
-          >
-            Telegram chat ID where escalations are sent for human review. Leave empty to log escalations without forwarding them to Telegram.
-          </TextField>
-          <div style={twoColumnGridStyle}>
-            <label style={pairedFieldStyle}>
-              <span style={{ color: "#4b5563", fontSize: 12, fontWeight: 700 }}>Escalation timeout (ms)</span>
-              <input
-                disabled={escalationLoading || escalationSaving}
-                min={0}
-                onChange={(event) => updateEscalationField("escalationTimeoutMs", Number(event.currentTarget.value))}
-                placeholder="900000"
-                style={standardInputStyle}
-                type="number"
-                value={escalationConfig.escalationTimeoutMs}
-              />
-              <span style={helperTextStyle}>
-                How long to wait for a human response. Default is 900000 ms, or 15 minutes.
-              </span>
-            </label>
-            <label style={pairedFieldStyle}>
-              <span style={{ color: "#4b5563", fontSize: 12, fontWeight: 700 }}>Default action on timeout</span>
-              <select
-                disabled={escalationLoading || escalationSaving}
-                onChange={(event) => updateEscalationField("escalationDefaultAction", event.currentTarget.value as TelegramEscalationConfig["escalationDefaultAction"])}
-                style={standardInputStyle}
-                value={escalationConfig.escalationDefaultAction}
-              >
-                <option value="defer">Defer</option>
-                <option value="auto_reply">Auto reply</option>
-                <option value="close">Close</option>
-              </select>
-              <span style={helperTextStyle}>
-                Defer does nothing, auto reply sends the suggested reply, and close ends the escalation path.
-              </span>
-            </label>
-          </div>
-          <TextAreaField
-            disabled={escalationLoading || escalationSaving}
-            label="Hold message"
-            onChange={(value) => updateEscalationField("escalationHoldMessage", value)}
-            placeholder="Let me check on that - I'll get back to you shortly."
-            rows={3}
-            value={escalationConfig.escalationHoldMessage}
-          >
-            Message sent to the original Telegram user when their conversation is escalated to a human.
-          </TextAreaField>
-        </div>
-
-        {escalationMessage ? <NoticeBlock notice={escalationMessage} /> : null}
-
-        <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
-          <button
-            disabled={escalationLoading || escalationSaving}
-            onClick={() => {
-              setEscalationConfig(escalationSnapshot);
-              setEscalationMessage(null);
-            }}
-            style={{
-              background: "white",
-              border: "1px solid #d1d5db",
-              borderRadius: 8,
-              color: "#374151",
-              cursor: escalationLoading || escalationSaving ? "not-allowed" : "pointer",
-              fontWeight: 700,
-              padding: "10px 14px",
-            }}
-            type="button"
-          >
-            Reset
-          </button>
-          <button
-            disabled={escalationLoading || escalationSaving || !escalationDirty}
-            onClick={() => {
-              void handleSaveEscalationConfig();
-            }}
-            style={{
-              background: escalationLoading || escalationSaving || !escalationDirty ? "#9ca3af" : "#111827",
-              border: 0,
-              borderRadius: 8,
-              color: "white",
-              cursor: escalationLoading || escalationSaving || !escalationDirty ? "not-allowed" : "pointer",
-              fontWeight: 700,
-              minWidth: 160,
-              padding: "10px 14px",
-            }}
-            type="button"
-          >
-            {escalationSaving ? "Saving..." : "Save escalation"}
-          </button>
-        </div>
-      </section>
-
-      <section
-        style={{
-          border: "1px solid #e5e7eb",
-          borderRadius: 8,
-          display: "grid",
-          gap: 18,
-          padding: 18,
-        }}
-      >
-        <div style={{ display: "grid", gap: 4 }}>
-          <h2 style={{ fontSize: 18, fontWeight: 700, lineHeight: "28px", margin: 0 }}>Proactive Suggestions</h2>
-          <p style={{ color: "#6b7280", margin: 0 }}>
-            Controls the scheduled watch system that sends Telegram suggestions when registered watches match Paperclip activity.
-          </p>
-        </div>
-
-        <div style={twoColumnGridStyle}>
-          <label style={pairedFieldStyle}>
-            <span style={{ color: "#4b5563", fontSize: 12, fontWeight: 700 }}>Suggestion rate limit</span>
-            <input
-              disabled={proactiveLoading || proactiveSaving}
-              min={0}
-              onChange={(event) => updateProactiveField("maxSuggestionsPerHourPerCompany", Number(event.currentTarget.value))}
-              placeholder="10"
-              style={standardInputStyle}
-              type="number"
-              value={proactiveConfig.maxSuggestionsPerHourPerCompany}
-            />
-            <span style={helperTextStyle}>
-              Maximum proactive suggestions sent per company per hour. Set to 0 to suppress watch suggestions without deleting watches.
-            </span>
-          </label>
-          <label style={pairedFieldStyle}>
-            <span style={{ color: "#4b5563", fontSize: 12, fontWeight: 700 }}>Watch deduplication window (ms)</span>
-            <input
-              disabled={proactiveLoading || proactiveSaving}
-              min={0}
-              onChange={(event) => updateProactiveField("watchDeduplicationWindowMs", Number(event.currentTarget.value))}
-              placeholder="86400000"
-              style={standardInputStyle}
-              type="number"
-              value={proactiveConfig.watchDeduplicationWindowMs}
-            />
-            <span style={helperTextStyle}>
-              Suppresses repeat suggestions for the same watch/entity pair within this window. Default is 86400000 ms, or 24 hours.
-            </span>
-          </label>
-        </div>
-
-        <div
-          style={{
-            background: "#f9fafb",
-            border: "1px solid #e5e7eb",
-            borderRadius: 8,
-            color: "#4b5563",
-            display: "grid",
-            fontSize: 13,
-            gap: 4,
-            padding: 12,
-          }}
-        >
-          <strong style={{ color: "#374151" }}>Watch controls</strong>
-          <span>
-            Individual watches are created by agents through the `register_watch` tool and stored per company. This section controls global rate limiting and duplicate suppression; it does not create or delete watch definitions.
-          </span>
-        </div>
-
-        {proactiveMessage ? <NoticeBlock notice={proactiveMessage} /> : null}
-
-        <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
-          <button
-            disabled={proactiveLoading || proactiveSaving}
-            onClick={() => {
-              setProactiveConfig(proactiveSnapshot);
-              setProactiveMessage(null);
-            }}
-            style={{
-              background: "white",
-              border: "1px solid #d1d5db",
-              borderRadius: 8,
-              color: "#374151",
-              cursor: proactiveLoading || proactiveSaving ? "not-allowed" : "pointer",
-              fontWeight: 700,
-              padding: "10px 14px",
-            }}
-            type="button"
-          >
-            Reset
-          </button>
-          <button
-            disabled={proactiveLoading || proactiveSaving || !proactiveDirty}
-            onClick={() => {
-              void handleSaveProactiveConfig();
-            }}
-            style={{
-              background: proactiveLoading || proactiveSaving || !proactiveDirty ? "#9ca3af" : "#111827",
-              border: 0,
-              borderRadius: 8,
-              color: "white",
-              cursor: proactiveLoading || proactiveSaving || !proactiveDirty ? "not-allowed" : "pointer",
-              fontWeight: 700,
-              minWidth: 160,
-              padding: "10px 14px",
-            }}
-            type="button"
-          >
-            {proactiveSaving ? "Saving..." : "Save suggestions"}
-          </button>
+          <button disabled={connectionLoading || connectionSaving} onClick={() => { setConnectionConfig(connectionSnapshot); setConnectionMessage(null); }} style={{ background: "white", border: "1px solid #d1d5db", borderRadius: 8, color: "#374151", cursor: "pointer", fontWeight: 700, padding: "10px 14px" }} type="button">Reset</button>
+          <button disabled={connectionLoading || connectionSaving || !connectionDirty} onClick={() => { void handleSaveConnectionConfig(); }} style={{ background: connectionLoading || connectionSaving || !connectionDirty ? "#9ca3af" : "#111827", border: 0, borderRadius: 8, color: "white", cursor: "pointer", fontWeight: 700, minWidth: 160, padding: "10px 14px" }} type="button">{connectionSaving ? "Saving..." : "Save connection"}</button>
         </div>
       </section>
     </main>
   );
 }
-
 function NoticeBlock({ notice }: { notice: Notice }): React.JSX.Element {
   return (
     <div

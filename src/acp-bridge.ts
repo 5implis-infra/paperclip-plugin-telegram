@@ -72,9 +72,12 @@ type OutputQueueEntry = {
 
 export function setupAcpOutputListener(
   ctx: PluginContext,
-  token: string,
+  tokenResolver: (companyId: string) => string | undefined,
 ): void {
   ctx.events.on(ACP_OUTPUT_EVENT, async (event) => {
+    const companyId = event.companyId;
+    const token = tokenResolver(companyId);
+    if (!token) return;
     const payload = event.payload as AcpOutputEvent;
     await handleAcpOutput(ctx, token, payload);
   });

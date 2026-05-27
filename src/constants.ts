@@ -1,4 +1,4 @@
-export const PLUGIN_ID = "paperclip-plugin-telegram";
+export const PLUGIN_ID = "paperclip-plugin-telegram-v2";
 export const PLUGIN_VERSION = "0.3.0";
 export const MAX_AGENTS_PER_THREAD = 5;
 
