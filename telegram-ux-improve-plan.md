@@ -1,6 +1,70 @@
 # Telegram Improve Plan
 
-## refId: #DEF COMANDOS
+## Objetivo
+Criar um plano de melhorias de UX para o plugin Telegram.
+
+## Regras
+- 'refId' são sessões para agrupar assuntos (ex.: `COMANDOS`, `PENDENCIAS`).
+- Pendencias tem IDs numericos sequenciais (1, 2, 3...).
+- Pendencias sao itens em aberto para definir/decidir (nao e lista de implementacao).
+
+
+## refId: #MAPA ATUAL
+
+### Objetivo
+Listar os tipos de mensagens que o plugin envia para o Telegram.
+
+### Tipos de mensagens
+O plugin hoje envia para o Telegram estes tipos de mensagens (pensando só no que “aparece no chat”)
+
+
+1. Notificações de issue
+- issue.created (issue criada)
+- issue.updated quando vira done (issue concluída)
+- issue.updated quando muda assignee (atribuída a alguém) (se habilitado)
+2. Notificações de approval
+- approval.created (pedido de aprovação)
+- Normalmente vem com botões inline tipo aprovar/rejeitar (dependendo do fluxo)
+3. Notificações de agentes (runs)
+- agent.run.failed (erro do agente) (essa é a “❌ Agent Error”)
+- agent.run.started (run começou) (se habilitado)
+- agent.run.finished (run terminou) (se habilitado)
+4. Digest
+- “Daily Digest / Digest” (job agendado): resumo do dia (tarefas criadas/concluídas, agents ativos, etc.)
+5. Escalação para humano
+- Mensagens geradas quando um agente chama o tool escalate_to_human (inclui botões tipo Reply/Override/Dismiss e às vezes “Send Suggested Reply”)
+6. Mensagens de “sessão de agente” (ACP/native)
+- Confirmações do /acp spawn, /acp status, /acp cancel, /acp close
+- Outputs do agente dentro do tópico (mensagens com label tipo [CEO] ...), e o plugin registra mapping dessas mensagens para permitir reply continuar a conversa
+7. Mensagens de comandos
+- Respostas dos comandos /status, /issues, /agents, /help, /connect, /topics, /connect_topic, /approve, /commands, etc.
+8. Mensagens “proativas” / watches
+- Sugestões/alertas enviados por watches registrados (via register_watch) (tipo “ei, observei X, sugiro Y”)
+
+
+### Comandos (built-in)  
+
+ 1. /help: lista comandos.  
+ 2. /status: mostra status da empresa (agents/issues).  
+ 3. /issues [filtro]: lista issues abertas (opcional filtrar por projeto).  
+ 4. /agents: lista agents e status.  
+ 5. /create <titulo>: cria uma issue/tarefa (tenta atribuir ao CEO).  
+ 6. /approve <approval-id>: aprova uma solicitação pendente.  
+ 7. /connect <company-name>: vincula este chat a uma company no Paperclip.  
+ 8. /connect_topic <project-name> [topic-id]: mapeia projeto para um tópico (forum).  
+ 9. /topics [list|remove|clear]: gerencia mapeamentos de tópicos.  
+10. /acp [spawn|status|cancel|close]: gerencia sessões de agente no tópico.  
+11. /commands [list|import|run|delete]: gerencia comandos customizados (workflows).  
+12. /<custom>: comandos adicionados via /commands import.
+
+
+### Mensagens livres (sem /...)  
+
+1. Em tópicos (threads): se houver sessão ativa/mapeamento, a mensagem é roteada para o agente (routeMessageToAgent).  
+2. Como resposta a uma mensagem do bot: se enableInbound estiver ligado, roteia para uma escalação (escalation) ou vira comentário em issue (dependendo do mapping salvo).
+
+
+## refId: COMANDOS
 
 ### Objetivo
 Definir comportamento e UX dos comandos do bot no Telegram.
@@ -27,7 +91,7 @@ Definir comportamento e UX dos comandos do bot no Telegram.
   - sintaxe: `/create @agenteId texto livre...`
   - titulo: primeira frase do texto
   - descricao: texto sem o titulo
-  - se nao informar `@agenteId`: retornar lista de agentes para selecionar (mesmo UX definido na refId `#DEF ACP`)
+  - se nao informar `@agenteId`: retornar lista de agentes para selecionar (mesmo UX definido na refId `ACP`)
 - `/approve`:
   - digitado manualmente: responder com mensagem do tipo "aprovar o que?" (orientando usar o botao)
   - permitido via callback e via reply na mensagem de approval com `/approve` + mensagem (opcional)
@@ -38,7 +102,7 @@ Definir comportamento e UX dos comandos do bot no Telegram.
 - `/commands`: ok
 - `/custom`: ok
 
-## refId: #DEF TOPICOS
+## refId: TOPICOS
 
 ### Objetivo
 Definir o modelo de topicos/threads no Telegram e como isso afeta comandos, mapeamentos e roteamento.
@@ -51,7 +115,7 @@ Definir o modelo de topicos/threads no Telegram e como isso afeta comandos, mape
 3. Topicos criados por `spawn` (sessao com agente / ACP) sao tratados como "overrides".
    - como linkar outros eventos a esse topico sera definido na refId `/acp`.
 
-## refId: #DEF BOTOES
+## refId: BOTOES
 
 ### Objetivo
 Definir padroes de botoes (inline/callback) e acoes no Telegram.
@@ -82,9 +146,9 @@ Definir padroes de botoes (inline/callback) e acoes no Telegram.
 3. Sessao e generica (nao 1:1 com agentId ou runId):
    - se a sessao tiver topico, mensagens respondidas nela vao sempre para o topico
    - agent/run sao metadados opcionais da sessao (quando existirem)
-4. Como vincular novas runs e eventos ao topico/sessao criado pelo botao fica para a refId `#DEF ACP`.
+4. Como vincular novas runs e eventos ao topico/sessao criado pelo botao fica para a refId `ACP`.
 
-## refId: #DEF ACP
+## refId: ACP
 
 ### Objetivo
 Definir como sessoes de agente funcionam via `/acp` e como elas se conectam a topicos.
@@ -110,12 +174,7 @@ Definir como sessoes de agente funcionam via `/acp` e como elas se conectam a to
    - verificar se o chat e forum
    - se nao for forum: responder erro amigavel e abortar todo o processo (sem criar sessao, sem persistir state, sem disparar eventos)
 
-## refId: #DEF PENDENCIAS
-
-### Regras
-- Sessoes tem nomes (ex.: `#DEF COMANDOS`, `#DEF PENDENCIAS`).
-- Pendencias tem IDs numericos sequenciais (1, 2, 3...).
-- Pendencias sao itens em aberto para definir/decidir (nao e lista de implementacao).
+## refId: PENDENCIAS
 
 ### Lista de pendencias
 \(sem pendencias no momento\)
