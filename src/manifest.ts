@@ -46,9 +46,9 @@ const manifest: PaperclipPluginManifestV1 = {
       {
         type: "companySettingsPage",
         id: "telegram-settings",
-        displayName: "Telegram Settings",
+        displayName: "Telegram",
         exportName: "TelegramSettingsPage",
-        routePath: "telegram-settings",
+        routePath: "telegram",
       },
     ],
   },
