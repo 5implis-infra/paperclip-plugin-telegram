@@ -436,9 +436,12 @@ const plugin = definePlugin({
           ...BOT_COMMANDS_MENU,
           { command: "commands", description: "Manage custom workflow commands" },
         ];
-        setMyCommands(ctx, token, allCommands)
-          .then((registered) => {
-            if (registered) ctx.logger.info("Bot commands registered with Telegram", { companyId });
+        Promise.all([
+          setMyCommands(ctx, token, allCommands),
+          setMyCommands(ctx, token, allCommands, { type: "all_group_chats" }),
+        ])
+          .then(([defaultOk, groupOk]) => {
+            if (defaultOk && groupOk) ctx.logger.info("Bot commands registered with Telegram", { companyId });
           })
           .catch((err) => {
             ctx.logger.error("Failed to register bot commands", { companyId, error: String(err) });

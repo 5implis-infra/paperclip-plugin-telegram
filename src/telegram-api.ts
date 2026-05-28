@@ -149,12 +149,13 @@ export async function setMyCommands(
   ctx: PluginContext,
   token: string,
   commands: Array<{ command: string; description: string }>,
+  scope?: { type: string; chat_id?: string | number },
 ): Promise<boolean> {
   try {
     const res = await ctx.http.fetch(`${TELEGRAM_API}/bot${token}/setMyCommands`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ commands }),
+      body: JSON.stringify({ commands, ...(scope ? { scope } : {}) }),
     });
     const data = (await res.json()) as { ok: boolean };
     return data.ok;
