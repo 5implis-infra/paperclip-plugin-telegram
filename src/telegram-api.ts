@@ -181,6 +181,49 @@ export async function sendChatAction(
   }
 }
 
+export type ForumTopic = {
+  messageThreadId: number;
+  name: string;
+};
+
+export async function createForumTopic(
+  ctx: PluginContext,
+  token: string,
+  chatId: string,
+  name: string,
+  iconEmojiId?: string,
+): Promise<ForumTopic> {
+  const body: Record<string, unknown> = { chat_id: chatId, name };
+  if (iconEmojiId) body.icon_emoji_id = iconEmojiId;
+
+  const res = await ctx.http.fetch(`${TELEGRAM_API}/bot${token}/createForumTopic`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const data = (await res.json()) as {
+    ok: boolean;
+    result?: { message_thread_id: number; name: string };
+    description?: string;
+    error_code?: number;
+  };
+
+  if (!data.ok) {
+    if (data.error_code === 400 && data.description?.includes("not a supergroup")) {
+      throw new Error("Este chat não é um supergrupo com tópicos habilitados.");
+    }
+    if (data.error_code === 403) {
+      throw new Error("O bot não tem permissão de administrador para criar tópicos.");
+    }
+    throw new Error(data.description ?? "Falha ao criar tópico no Telegram.");
+  }
+
+  return {
+    messageThreadId: data.result!.message_thread_id,
+    name: data.result!.name,
+  };
+}
+
 /**
  * Check if a chat is a forum (has topics enabled).
  * Caches the result per chatId for the lifetime of the process.
@@ -208,6 +251,31 @@ export async function isForum(
   } catch {
     return false;
   }
+}
+
+/**
+ * Returns true if the chat is a forum; otherwise sends a user-friendly error
+ * message and returns false. All topic-creation flows must call this first and
+ * abort on false — no state should be persisted before this check passes.
+ */
+export async function checkForumOrError(
+  ctx: PluginContext,
+  token: string,
+  chatId: string,
+  messageThreadId?: number,
+): Promise<boolean> {
+  const ok = await isForum(ctx, token, chatId);
+  if (!ok) {
+    await sendMessage(
+      ctx,
+      token,
+      chatId,
+      "Este chat não é um forum com tópicos habilitados. Habilite os tópicos no grupo e tente novamente.",
+      { messageThreadId },
+    );
+    return false;
+  }
+  return true;
 }
 
 /** General topic thread ID for forum groups. */

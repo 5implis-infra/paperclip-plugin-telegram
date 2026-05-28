@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { handleCommand, BOT_COMMANDS, handleConnectTopic, getTopicForProject, resolveNotificationThreadId } from "../src/commands.js";
+import { handleCommand, BOT_COMMANDS, BOT_COMMANDS_MENU, handleConnectTopic, getTopicForProject, resolveNotificationThreadId } from "../src/commands.js";
 import type { PluginContext } from "@paperclipai/plugin-sdk";
 
 let sentMessages: Array<{ chatId: string; text: string; options?: Record<string, unknown> }> = [];
@@ -121,10 +121,11 @@ describe("handleCommand", () => {
     expect(sentMessages[0].text).toContain("Agents");
   });
 
-  it("routes /approve without args shows usage", async () => {
+  it("routes /approve without args shows orientative message", async () => {
     const ctx = mockCtx();
     await handleCommand(ctx, "token", "123", "approve", "");
-    expect(sentMessages[0].text).toContain("Usage");
+    expect(sentMessages[0].text).toContain("Approve");
+    expect(sentMessages[0].text).not.toContain("Usage:");
   });
 
   it("routes /approve with id calls API with configurable base URL", async () => {
@@ -154,21 +155,35 @@ describe("handleCommand", () => {
     expect(metricsWritten.some(m => m.name === "telegram_commands_handled")).toBe(true);
   });
 
-  it("/connect stores company mapping", async () => {
+  it("/connect maps a project to a forum topic (explicit topic id)", async () => {
     const ctx = mockCtx();
-    (ctx.companies as unknown) = {
-      list: vi.fn().mockResolvedValue([{ id: "co-1", name: "MyCompany" }]),
-    };
-    await handleCommand(ctx, "token", "123", "connect", "MyCompany");
-    expect(stateStore["chat_123"]).toEqual(
-      expect.objectContaining({ companyId: "co-1", companyName: "MyCompany" }),
-    );
+    await handleCommand(ctx, "token", "123", "connect", "Backend 42");
+    expect(stateStore["topic-map-123"]).toEqual({
+      Backend: { projectId: "backend-project-id", projectName: "Backend", topicId: "42" },
+    });
+    expect(sentMessages[0].text).toContain("Mapped project");
   });
 
-  it("/connect without args shows usage", async () => {
+  it("/connect maps a project to the current forum topic when called inside a thread", async () => {
+    const ctx = mockCtx();
+    await handleCommand(ctx, "token", "123", "connect", "Backend", 99);
+    expect(stateStore["topic-map-123"]).toEqual({
+      Backend: { projectId: "backend-project-id", projectName: "Backend", topicId: "99" },
+    });
+  });
+
+  it("/connect without args shows usage with /connect command name", async () => {
     const ctx = mockCtx();
     await handleCommand(ctx, "token", "123", "connect", "");
     expect(sentMessages[0].text).toContain("Usage");
+    expect(sentMessages[0].text).toContain("/connect");
+    expect(sentMessages[0].text).not.toContain("connect\\_topic");
+  });
+
+  it("/connect does not write chat_${chatId} company state", async () => {
+    const ctx = mockCtx();
+    await handleCommand(ctx, "token", "123", "connect", "Backend 42");
+    expect(stateStore["chat_123"]).toBeUndefined();
   });
 
   it("/issues filters by project name", async () => {
@@ -190,12 +205,12 @@ describe("handleCommand", () => {
     expect(sentMessages[0].text).toContain("Usage");
   });
 
-  it("/create creates issue then updates assignee and status to trigger wake", async () => {
+  it("/create @agent creates issue then updates assignee (two-step wake trigger)", async () => {
     const ctx = mockCtx();
     (ctx.agents as unknown) = {
       list: vi.fn().mockResolvedValue([
         { id: "a1", name: "Builder", status: "active", role: "engineer" },
-        { id: "ceo-1", name: "Zhu Li", status: "idle", role: "ceo" },
+        { id: "ceo-1", name: "CEO", status: "idle", role: "ceo" },
       ]),
     };
     (ctx.companies as unknown) = {
@@ -208,7 +223,8 @@ describe("handleCommand", () => {
       create: vi.fn().mockResolvedValue(createdIssue),
       update: vi.fn().mockResolvedValue(updatedIssue),
     };
-    await handleCommand(ctx, "token", "123", "create", "Board prep for Q1");
+    // Use @CEO prefix — new /create @agent syntax
+    await handleCommand(ctx, "token", "123", "create", "@CEO Board prep for Q1");
     // Create call: NO assignee (important for wake trigger)
     expect(ctx.issues.create).toHaveBeenCalledWith(
       expect.not.objectContaining({ assigneeAgentId: expect.any(String) }),
@@ -221,15 +237,15 @@ describe("handleCommand", () => {
     );
     expect(sentMessages[0].text).toContain("Task created");
     expect(sentMessages[0].text).toContain("MC\\-99");
-    expect(sentMessages[0].text).toContain("Zhu Li");
+    expect(sentMessages[0].text).toContain("CEO");
   });
 
-  it("/create attaches the issue to the project mapped to the current forum topic", async () => {
+  it("/create @agent attaches issue to the project mapped to the current forum topic", async () => {
     stateStore["topic-map-123"] = { "Setup and Tests": "58" };
     const ctx = mockCtx();
     (ctx.agents as unknown) = {
       list: vi.fn().mockResolvedValue([
-        { id: "ceo-1", name: "Zhu Li", status: "idle", role: "ceo" },
+        { id: "ceo-1", name: "CEO", status: "idle", role: "ceo" },
       ]),
     };
     const createdIssue = { id: "i-new", identifier: "MC-101", title: "Topic scoped task", status: "backlog" };
@@ -239,7 +255,7 @@ describe("handleCommand", () => {
       update: vi.fn().mockResolvedValue({ ...createdIssue, status: "todo", assigneeAgentId: "ceo-1" }),
     };
 
-    await handleCommand(ctx, "token", "123", "create", "Topic scoped task", 58);
+    await handleCommand(ctx, "token", "123", "create", "@CEO Topic scoped task", 58);
 
     expect(ctx.issues.create).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -251,16 +267,8 @@ describe("handleCommand", () => {
     expect(sentMessages[0].options).toMatchObject({ messageThreadId: 58 });
   });
 
-  it("/create works without a CEO agent", async () => {
+  it("/create without @agent shows agent picker instead of creating issue", async () => {
     const ctx = mockCtx();
-    (ctx.agents as unknown) = {
-      list: vi.fn().mockResolvedValue([
-        { id: "a1", name: "Builder", status: "active", role: "engineer" },
-      ]),
-    };
-    (ctx.companies as unknown) = {
-      get: vi.fn().mockResolvedValue({ id: "co-1", name: "MyCompany", issuePrefix: null }),
-    };
     const createdIssue = { id: "i-new", identifier: "MC-100", title: "Some task", status: "backlog" };
     (ctx.issues as unknown) = {
       ...ctx.issues,
@@ -268,15 +276,11 @@ describe("handleCommand", () => {
       update: vi.fn().mockResolvedValue({ ...createdIssue, status: "todo" }),
     };
     await handleCommand(ctx, "token", "123", "create", "Some task");
-    expect(ctx.issues.create).toHaveBeenCalledWith(
-      expect.not.objectContaining({ assigneeAgentId: expect.any(String) }),
-    );
-    expect(ctx.issues.update).toHaveBeenCalledWith(
-      "i-new",
-      { status: "todo" },
-      expect.any(String),
-    );
-    expect(sentMessages[0].text).toContain("Task created");
+    // Picker is shown — no issue is created directly
+    expect(ctx.issues.create).not.toHaveBeenCalled();
+    // Picker message or pending state should be set
+    const pendingKeys = Object.keys(stateStore).filter((k) => k.startsWith("create_pending_"));
+    expect(pendingKeys.length).toBeGreaterThan(0);
   });
 });
 
@@ -479,7 +483,43 @@ describe("BOT_COMMANDS", () => {
     expect(names).toContain("approve");
     expect(names).toContain("help");
     expect(names).toContain("connect");
-    expect(names).toContain("connect_topic");
     expect(names).toContain("topics");
+  });
+
+  it("does not include connect_topic (deprecated)", () => {
+    const names = BOT_COMMANDS.map(c => c.command);
+    expect(names).not.toContain("connect_topic");
+  });
+});
+
+describe("BOT_COMMANDS_MENU", () => {
+  it("does not include /approve", () => {
+    const names = BOT_COMMANDS_MENU.map(c => c.command);
+    expect(names).not.toContain("approve");
+  });
+
+  it("does not include /connect_topic", () => {
+    const names = BOT_COMMANDS_MENU.map(c => c.command);
+    expect(names).not.toContain("connect_topic");
+  });
+
+  it("includes all other user-facing commands", () => {
+    const names = BOT_COMMANDS_MENU.map(c => c.command);
+    expect(names).toContain("status");
+    expect(names).toContain("issues");
+    expect(names).toContain("agents");
+    expect(names).toContain("help");
+    expect(names).toContain("connect");
+    expect(names).toContain("topics");
+    expect(names).toContain("acp");
+  });
+});
+
+describe("/connect_topic deprecated", () => {
+  it("responds as unknown command", async () => {
+    const ctx = mockCtx();
+    await handleCommand(ctx, "token", "123", "connect_topic", "Backend 42");
+    expect(sentMessages[0].text).toContain("Unknown command");
+    expect(sentMessages[0].text).toContain("connect_topic");
   });
 });

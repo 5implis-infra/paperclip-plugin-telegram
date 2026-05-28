@@ -134,14 +134,18 @@ export async function handleMediaMessage(
       const projectId = await resolveMappedProjectIdForTopic(ctx, chatId, companyId, threadId);
 
       if (target.transport === "native") {
-        await wakeAgentWithIssue(
-          ctx,
-          target.agentId,
-          companyId,
-          prompt,
-          "media_message",
-          projectId,
-        );
+        if (!target.agentId) {
+          ctx.logger.error("Media route: native session has no agentId", { sessionId: target.sessionId });
+        } else {
+          await wakeAgentWithIssue(
+            ctx,
+            target.agentId,
+            companyId,
+            prompt,
+            "media_message",
+            projectId,
+          );
+        }
       } else {
         ctx.events.emit("acp-spawn", companyId, {
           type: "message",

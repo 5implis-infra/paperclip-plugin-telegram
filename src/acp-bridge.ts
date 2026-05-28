@@ -1,6 +1,12 @@
 import type { PluginContext, AgentSessionEvent } from "@paperclipai/plugin-sdk";
-import { sendMessage, escapeMarkdownV2, sendChatAction } from "./telegram-api.js";
-import { truncateAtWord } from "./telegram-api.js";
+import {
+  sendMessage,
+  escapeMarkdownV2,
+  sendChatAction,
+  checkForumOrError,
+  createForumTopic,
+  truncateAtWord,
+} from "./telegram-api.js";
 import { resolveMappedProjectIdForTopic } from "./topic-projects.js";
 import {
   MAX_AGENTS_PER_THREAD,
@@ -14,13 +20,21 @@ import {
 
 export type ChatSession = {
   sessionId: string;
-  agentId: string;
-  agentName: string;
-  agentDisplayName: string;
+  agentId?: string;
+  agentName?: string;
+  agentDisplayName?: string;
   transport: "native" | "acp";
   spawnedAt: string;
   status: "active" | "closed";
   lastActivityAt: string;
+  /** threadId do tópico vinculado (preenchido em sessões criadas via createSessionWithTopic) */
+  topicId?: number;
+  /** runId que originou a sessão (criada via botão de run) */
+  sourceRunId?: string;
+  /** agentId de origem quando a sessão foi criada via evento de run */
+  sourceAgentId?: string;
+  /** tipo do evento de run que originou a sessão */
+  sourceEventType?: "agent.run.failed" | "agent.run.started" | "agent.run.finished";
 };
 
 type AcpOutputEvent = {
@@ -141,7 +155,7 @@ export async function handleAcpCommand(
  */
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-async function resolveAgentByName(
+export async function resolveAgentByName(
   ctx: PluginContext,
   name: string,
   companyId: string,
@@ -175,6 +189,94 @@ async function resolveAgentByName(
   }
 }
 
+// --- Agent picker (3.1) ---
+
+const PICKER_PAGE_SIZE = 8;
+
+type AgentPickerOpts = {
+  page: number;
+  showAll: boolean;
+  callbackPrefix: string;
+};
+
+type AgentPickerContent = {
+  text: string;
+  keyboard: Array<Array<{ text: string; callback_data: string }>>;
+};
+
+export async function buildAgentPickerContent(
+  ctx: PluginContext,
+  companyId: string,
+  opts: AgentPickerOpts,
+): Promise<AgentPickerContent> {
+  const allAgents = (await ctx.agents.list({ companyId })) as Array<{
+    id?: string;
+    agentId?: string;
+    _id?: string;
+    name?: string;
+    status?: string;
+  }>;
+
+  const active = allAgents
+    .filter((a) => a.status === "active")
+    .sort((a, b) => (a.name ?? "").localeCompare(b.name ?? ""));
+  const inactive = allAgents
+    .filter((a) => a.status !== "active")
+    .sort((a, b) => (a.name ?? "").localeCompare(b.name ?? ""));
+
+  const hasInactive = inactive.length > 0;
+  const list = opts.showAll ? [...active, ...inactive] : active;
+
+  const totalPages = Math.max(1, Math.ceil(list.length / PICKER_PAGE_SIZE));
+  const page = Math.max(0, Math.min(opts.page, totalPages - 1));
+  const pageAgents = list.slice(page * PICKER_PAGE_SIZE, (page + 1) * PICKER_PAGE_SIZE);
+
+  const { callbackPrefix } = opts;
+  const rows: Array<Array<{ text: string; callback_data: string }>> = [];
+
+  for (const agent of pageAgents) {
+    const agentId = String(agent.agentId ?? agent._id ?? agent.id ?? "");
+    const isActive = agent.status === "active";
+    const emoji = isActive ? "✅" : "❌";
+    const name = (agent.name ?? "Agent").slice(0, 25);
+    rows.push([{ text: `${emoji} ${name}`, callback_data: `${callbackPrefix}_sel_${agentId}` }]);
+  }
+
+  const navRow: Array<{ text: string; callback_data: string }> = [];
+  if (page > 0) navRow.push({ text: "← Anterior", callback_data: `${callbackPrefix}_page_${page - 1}` });
+  if (page < totalPages - 1) navRow.push({ text: "Próxima →", callback_data: `${callbackPrefix}_page_${page + 1}` });
+  if (!opts.showAll && hasInactive) navRow.push({ text: "Ver todos", callback_data: `${callbackPrefix}_all_0` });
+  if (navRow.length > 0) rows.push(navRow);
+
+  const pageLabel = totalPages > 1 ? ` (${page + 1}/${totalPages})` : "";
+  const listLabel = opts.showAll ? "Todos os agentes" : "Agentes ativos";
+  const text = list.length === 0
+    ? "Nenhum agente disponível."
+    : `🤖 ${listLabel}${pageLabel} — selecione um:`;
+
+  return { text, keyboard: rows };
+}
+
+export async function sendAgentPickerPage(
+  ctx: PluginContext,
+  token: string,
+  chatId: string,
+  companyId: string,
+  opts: AgentPickerOpts & { messageThreadId?: number },
+): Promise<void> {
+  const { text, keyboard } = await buildAgentPickerContent(ctx, companyId, opts);
+
+  await ctx.state.set(
+    { scopeKind: "instance", stateKey: `picker_ctx_${chatId}_${opts.callbackPrefix}` },
+    { messageThreadId: opts.messageThreadId, companyId },
+  );
+
+  await sendMessage(ctx, token, chatId, text, {
+    messageThreadId: opts.messageThreadId,
+    inlineKeyboard: keyboard,
+  });
+}
+
 // --- Native prompt delivery via issue creation ---
 //
 // The Paperclip heartbeat system only delivers taskId/issueId/commentId to
@@ -191,6 +293,7 @@ export async function wakeAgentWithIssue(
   promptText: string,
   reason: string,
   projectId?: string,
+  opts?: { sessionId?: string; chatId?: string; threadId?: number },
 ): Promise<string | null> {
   try {
     const title = truncateAtWord(promptText.replace(/\n/g, " "), 200);
@@ -205,6 +308,17 @@ export async function wakeAgentWithIssue(
     });
 
     await ctx.issues.update(issue.id, { status: "todo" }, companyId);
+
+    if (opts?.sessionId && opts.chatId !== undefined && opts.threadId !== undefined) {
+      await ctx.state.set(
+        { scopeKind: "instance", stateKey: `issue_session_${issue.id}` },
+        { sessionId: opts.sessionId, chatId: opts.chatId, threadId: opts.threadId },
+      );
+      await ctx.state.set(
+        { scopeKind: "instance", stateKey: `session_last_issue_${opts.sessionId}` },
+        issue.id,
+      );
+    }
 
     ctx.logger.info("Created issue for native agent prompt delivery", {
       issueId: issue.id,
@@ -238,7 +352,13 @@ async function handleAcpSpawn(
   maxAgentsPerThread = MAX_AGENTS_PER_THREAD,
 ): Promise<void> {
   if (!agentName.trim()) {
-    await sendMessage(ctx, token, chatId, "Usage: /acp spawn <agent-name>", {
+    const isForum = await checkForumOrError(ctx, token, chatId, messageThreadId);
+    if (!isForum) return;
+    const resolvedCompanyId = companyId ?? await resolveCompanyIdFromChat(ctx, chatId);
+    await sendAgentPickerPage(ctx, token, chatId, resolvedCompanyId, {
+      page: 0,
+      showAll: false,
+      callbackPrefix: "acp_spawn",
       messageThreadId,
     });
     return;
@@ -259,7 +379,7 @@ async function handleAcpSpawn(
   const activeSessions = sessions.filter((s) => s.status === "active");
 
   if (activeSessions.length >= maxAgentsPerThread) {
-    const listing = activeSessions.map((s) => `  - ${s.agentDisplayName} (${s.transport})`).join("\n");
+    const listing = activeSessions.map((s) => `  - ${s.agentDisplayName ?? s.agentName ?? "Agent"} (${s.transport})`).join("\n");
     await sendMessage(
       ctx,
       token,
@@ -389,7 +509,7 @@ async function handleAcpStatus(
 
   for (const session of activeSessions) {
     lines.push(
-      `${escapeMarkdownV2("\ud83e\udd16")} *${escapeMarkdownV2(session.agentDisplayName)}* \\[${escapeMarkdownV2(session.transport)}\\]`,
+      `${escapeMarkdownV2("\ud83e\udd16")} *${escapeMarkdownV2(session.agentDisplayName ?? session.agentName ?? "Agent")}* \\[${escapeMarkdownV2(session.transport)}\\]`,
       `  Session: \`${escapeMarkdownV2(session.sessionId)}\``,
       `  Started: ${escapeMarkdownV2(session.spawnedAt)}`,
       `  Last active: ${escapeMarkdownV2(session.lastActivityAt)}`,
@@ -455,7 +575,7 @@ async function handleAcpCancel(
     ctx,
     token,
     chatId,
-    `${escapeMarkdownV2("\u23f9")} Cancellation requested for *${escapeMarkdownV2(target.agentDisplayName)}* \\(\`${escapeMarkdownV2(target.sessionId)}\`\\)`,
+    `${escapeMarkdownV2("\u23f9")} Cancellation requested for *${escapeMarkdownV2(target.agentDisplayName ?? target.agentName ?? "Agent")}* \\(\`${escapeMarkdownV2(target.sessionId)}\`\\)`,
     { parseMode: "MarkdownV2", messageThreadId },
   );
 
@@ -493,12 +613,12 @@ async function handleAcpClose(
 
   if (targetAgentName) {
     const lowerTarget = targetAgentName.toLowerCase();
-    targetSession = activeSessions.find((s) => s.agentName.toLowerCase() === lowerTarget);
+    targetSession = activeSessions.find((s) => s.agentName?.toLowerCase() === lowerTarget);
     if (!targetSession) {
-      targetSession = activeSessions.find((s) => s.agentName.toLowerCase().includes(lowerTarget));
+      targetSession = activeSessions.find((s) => s.agentName?.toLowerCase().includes(lowerTarget));
     }
     if (!targetSession) {
-      const listing = activeSessions.map((s) => `  - ${s.agentDisplayName}`).join("\n");
+      const listing = activeSessions.map((s) => `  - ${s.agentDisplayName ?? s.agentName ?? "Agent"}`).join("\n");
       await sendMessage(
         ctx,
         token,
@@ -543,7 +663,7 @@ async function handleAcpClose(
     ctx,
     token,
     chatId,
-    `${escapeMarkdownV2("\ud83d\udd0c")} Session for *${escapeMarkdownV2(targetSession.agentDisplayName)}* closed\\.`,
+    `${escapeMarkdownV2("\ud83d\udd0c")} Session for *${escapeMarkdownV2(targetSession.agentDisplayName ?? targetSession.agentName ?? "Agent")}* closed\\.`,
     { parseMode: "MarkdownV2", messageThreadId },
   );
 
@@ -579,11 +699,11 @@ export async function routeMessageToAgent(
   if (mentionMatch) {
     const mentionName = mentionMatch[1]!.toLowerCase();
     targetSession = activeSessions.find(
-      (s) => s.agentName.toLowerCase() === mentionName || s.agentDisplayName.toLowerCase() === mentionName,
+      (s) => s.agentName?.toLowerCase() === mentionName || s.agentDisplayName?.toLowerCase() === mentionName,
     );
     if (!targetSession) {
       targetSession = activeSessions.find(
-        (s) => s.agentName.toLowerCase().includes(mentionName) || s.agentDisplayName.toLowerCase().includes(mentionName),
+        (s) => s.agentName?.toLowerCase().includes(mentionName) || s.agentDisplayName?.toLowerCase().includes(mentionName),
       );
     }
   }
@@ -620,6 +740,12 @@ export async function routeMessageToAgent(
 
   // Route via correct transport
   if (targetSession.transport === "native") {
+    if (!targetSession.agentId) {
+      ctx.logger.error("Native session has no agentId — cannot route message", {
+        sessionId: targetSession.sessionId,
+      });
+      return false;
+    }
     const issueId = await wakeAgentWithIssue(
       ctx,
       targetSession.agentId,
@@ -1028,7 +1154,7 @@ async function executeHandoff(
   const activeSessions = sessions.filter((s) => s.status === "active");
   const lowerTarget = targetAgent.toLowerCase();
   let targetSession = activeSessions.find(
-    (s) => s.agentName.toLowerCase() === lowerTarget || s.agentDisplayName.toLowerCase() === lowerTarget,
+    (s) => s.agentName?.toLowerCase() === lowerTarget || s.agentDisplayName?.toLowerCase() === lowerTarget,
   );
 
   if (!targetSession) {
@@ -1094,6 +1220,10 @@ async function executeHandoff(
 
   // Send context to target agent
   if (targetSession.transport === "native") {
+    if (!targetSession.agentId) {
+      ctx.logger.error("Handoff target session has no agentId", { sessionId: targetSession.sessionId });
+      return;
+    }
     await wakeAgentWithIssue(
       ctx,
       targetSession.agentId,
@@ -1140,7 +1270,7 @@ export async function handleDiscussToolCall(
   // Find or spawn target
   const lowerTarget = targetAgent.toLowerCase();
   let targetSession = activeSessions.find(
-    (s) => s.agentName.toLowerCase() === lowerTarget || s.agentDisplayName.toLowerCase() === lowerTarget,
+    (s) => s.agentName?.toLowerCase() === lowerTarget || s.agentDisplayName?.toLowerCase() === lowerTarget,
   );
 
   if (!targetSession) {
@@ -1210,7 +1340,7 @@ export async function handleDiscussToolCall(
     initiatorSessionId: initiatorSession?.sessionId ?? "",
     targetSessionId: targetSession.sessionId,
     initiatorAgent: initiatorSession?.agentDisplayName ?? "Agent",
-    targetAgent: targetSession.agentDisplayName,
+    targetAgent: targetSession.agentDisplayName ?? targetSession.agentName ?? "Agent",
     topic,
     maxTurns,
     humanCheckpointAt,
@@ -1244,6 +1374,10 @@ export async function handleDiscussToolCall(
 
   // Send initial message to target via correct transport
   if (targetSession.transport === "native") {
+    if (!targetSession.agentId) {
+      ctx.logger.error("Discussion target session has no agentId", { sessionId: targetSession.sessionId });
+      return { error: "Target session has no agentId" };
+    }
     await wakeAgentWithIssue(
       ctx,
       targetSession.agentId,
@@ -1356,6 +1490,10 @@ async function checkConversationLoopContinuation(
       const resolvedCompanyId = await resolveCompanyIdFromChat(ctx, chatId);
 
       if (nextSession.transport === "native") {
+        if (!nextSession.agentId) {
+          ctx.logger.error("Conversation loop next session has no agentId", { sessionId: nextSession.sessionId });
+          return;
+        }
         await wakeAgentWithIssue(
           ctx,
           nextSession.agentId,
@@ -1374,6 +1512,232 @@ async function checkConversationLoopContinuation(
       }
     }
   }
+}
+
+// --- Close / Cancel session by sessionId (for /status buttons) ---
+
+export async function closeSessionById(
+  ctx: PluginContext,
+  token: string,
+  sessionId: string,
+  companyId: string,
+): Promise<boolean> {
+  const idx = await ctx.state.get({ scopeKind: "instance", stateKey: `session_idx_${sessionId}` }) as { chatId: string; topicId: number } | null;
+  if (!idx) return false;
+
+  const { chatId, topicId } = idx;
+  const sessions = await getSessions(ctx, chatId, topicId);
+  const target = sessions.find((s) => s.sessionId === sessionId);
+  if (!target) return false;
+
+  if (target.transport === "native") {
+    try { await ctx.agents.sessions.close(sessionId, companyId); } catch { /* best effort */ }
+  } else {
+    ctx.events.emit(ACP_SPAWN_EVENT, companyId, { type: "close", sessionId, chatId, threadId: topicId });
+  }
+
+  const i = sessions.findIndex((s) => s.sessionId === sessionId);
+  if (i >= 0) sessions[i]!.status = "closed";
+  await saveSessions(ctx, chatId, topicId, sessions);
+
+  await sendMessage(
+    ctx, token, chatId,
+    `${escapeMarkdownV2("🔌")} Session \`${escapeMarkdownV2(sessionId.slice(0, 12))}\` closed\\.`,
+    { parseMode: "MarkdownV2", messageThreadId: topicId },
+  );
+  return true;
+}
+
+export async function cancelSessionById(
+  ctx: PluginContext,
+  companyId: string,
+  sessionId: string,
+): Promise<boolean> {
+  const idx = await ctx.state.get({ scopeKind: "instance", stateKey: `session_idx_${sessionId}` }) as { chatId: string; topicId: number } | null;
+  if (!idx) return false;
+
+  const { chatId, topicId } = idx;
+  const sessions = await getSessions(ctx, chatId, topicId);
+  const target = sessions.find((s) => s.sessionId === sessionId);
+  if (!target) return false;
+
+  if (target.transport === "native") {
+    try { await ctx.agents.sessions.close(sessionId, companyId); } catch { /* best effort */ }
+  } else {
+    ctx.events.emit(ACP_SPAWN_EVENT, companyId, { type: "cancel", sessionId, chatId, threadId: topicId });
+  }
+  return true;
+}
+
+// --- Spawn by agentId (for picker callback in worker.ts) ---
+
+/**
+ * Spawns an agent session given a resolved agentId.
+ * If no messageThreadId is provided, creates a new forum topic first.
+ */
+export async function spawnAgentSessionById(
+  ctx: PluginContext,
+  token: string,
+  chatId: string,
+  agentId: string,
+  companyId: string,
+  messageThreadId?: number,
+  maxAgentsPerThread = MAX_AGENTS_PER_THREAD,
+): Promise<void> {
+  let threadId = messageThreadId;
+
+  if (!threadId) {
+    const isForum = await checkForumOrError(ctx, token, chatId);
+    if (!isForum) return;
+    let topic: { messageThreadId: number; name: string };
+    try {
+      topic = await createForumTopic(ctx, token, chatId, "Agent Session");
+    } catch (err) {
+      await sendMessage(ctx, token, chatId, `Erro ao criar tópico: ${String(err)}`);
+      return;
+    }
+    threadId = topic.messageThreadId;
+    const chatNumericId = chatId.replace(/^-100/, "");
+    const topicLink = `https://t.me/c/${chatNumericId}/${threadId}`;
+    await sendMessage(ctx, token, chatId, `🗂 Tópico criado. <a href="${topicLink}">Abrir tópico</a>`, { parseMode: "HTML" });
+  }
+
+  const allAgents = (await ctx.agents.list({ companyId })) as Array<{ id?: string; agentId?: string; _id?: string; name?: string }>;
+  const agent = allAgents.find((a) => {
+    const id = String(a.agentId ?? a._id ?? a.id ?? "");
+    return id === agentId;
+  });
+  const agentName = agent?.name ?? agentId;
+
+  await handleAcpSpawn(ctx, token, chatId, agentName, threadId, companyId, maxAgentsPerThread);
+}
+
+// --- createSessionWithTopic ---
+
+/**
+ * Cria um tópico no forum + uma sessão genérica vinculada a ele.
+ * Aborta sem persistir nenhum estado se o chat não for forum.
+ * Retorna { sessionId, topicId } ou null em caso de erro.
+ */
+export async function createSessionWithTopic(
+  ctx: PluginContext,
+  token: string,
+  chatId: string,
+  opts?: {
+    sourceRunId?: string;
+    sourceAgentId?: string;
+    sourceEventType?: "agent.run.failed" | "agent.run.started" | "agent.run.finished";
+    topicName?: string;
+  },
+): Promise<{ sessionId: string; topicId: number } | null> {
+  const isForum = await checkForumOrError(ctx, token, chatId);
+  if (!isForum) return null;
+
+  const topicName =
+    opts?.topicName ??
+    (opts?.sourceRunId ? `Run ${opts.sourceRunId.slice(0, 8)}` : "Agent Session");
+
+  let topic: { messageThreadId: number; name: string };
+  try {
+    topic = await createForumTopic(ctx, token, chatId, topicName);
+  } catch (err) {
+    ctx.logger.error("createSessionWithTopic: failed to create forum topic", {
+      chatId,
+      topicName,
+      error: String(err),
+    });
+    await sendMessage(ctx, token, chatId, `Erro ao criar tópico: ${String(err)}`);
+    return null;
+  }
+
+  const sessionId = `sess_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const now = new Date().toISOString();
+
+  const session: ChatSession = {
+    sessionId,
+    transport: "native",
+    spawnedAt: now,
+    status: "active",
+    lastActivityAt: now,
+    topicId: topic.messageThreadId,
+    sourceRunId: opts?.sourceRunId,
+    sourceAgentId: opts?.sourceAgentId,
+    sourceEventType: opts?.sourceEventType,
+  };
+
+  const sessions = await getSessions(ctx, chatId, topic.messageThreadId);
+  sessions.push(session);
+  await saveSessions(ctx, chatId, topic.messageThreadId, sessions);
+
+  const chatNumericId = chatId.replace(/^-100/, "");
+  const topicLink = `https://t.me/c/${chatNumericId}/${topic.messageThreadId}`;
+
+  await sendMessage(
+    ctx,
+    token,
+    chatId,
+    `🗂 Sessão criada. Abra o tópico para interagir: <a href="${topicLink}">Session #${topic.messageThreadId}</a>`,
+    { parseMode: "HTML" },
+  );
+
+  ctx.logger.info("createSessionWithTopic: session and topic created", {
+    sessionId,
+    topicId: topic.messageThreadId,
+    chatId,
+    sourceRunId: opts?.sourceRunId,
+    sourceAgentId: opts?.sourceAgentId,
+  });
+
+  return { sessionId, topicId: topic.messageThreadId };
+}
+
+// --- Open session callback handler (4.2) ---
+
+type OpenSessionResult =
+  | { status: "created"; sessionId: string; topicId: number }
+  | { status: "existing"; existingChatId: string; topicId: number }
+  | { status: "error" };
+
+/**
+ * Handles the "Abrir/Criar Sessão" button callback.
+ * Deduplicates by runId: if a session already exists for the run, returns "existing".
+ * Otherwise creates a new session+topic via createSessionWithTopic.
+ */
+export async function handleOpenSessionCallback(
+  ctx: PluginContext,
+  token: string,
+  chatId: string,
+  agentId: string,
+  runId: string | undefined,
+): Promise<OpenSessionResult> {
+  if (runId) {
+    const existing = await ctx.state.get({
+      scopeKind: "instance",
+      stateKey: `run_session_${runId}`,
+    }) as { sessionId: string; chatId: string; topicId: number } | null;
+
+    if (existing) {
+      return { status: "existing", existingChatId: existing.chatId, topicId: existing.topicId };
+    }
+  }
+
+  const result = await createSessionWithTopic(ctx, token, chatId, {
+    sourceAgentId: agentId || undefined,
+    sourceRunId: runId,
+  });
+
+  if (!result) {
+    return { status: "error" };
+  }
+
+  if (runId) {
+    await ctx.state.set(
+      { scopeKind: "instance", stateKey: `run_session_${runId}` },
+      { sessionId: result.sessionId, chatId, topicId: result.topicId },
+    );
+  }
+
+  return { status: "created", sessionId: result.sessionId, topicId: result.topicId };
 }
 
 // --- Session state helpers ---
@@ -1400,6 +1764,15 @@ async function saveSessions(
     { scopeKind: "instance", stateKey: `sessions_${chatId}_${threadId}` },
     sessions,
   );
+  // Persist reverse index for sessions with topicId so callbacks can look up chat/topic by sessionId
+  for (const s of sessions) {
+    if (s.topicId !== undefined) {
+      await ctx.state.set(
+        { scopeKind: "instance", stateKey: `session_idx_${s.sessionId}` },
+        { chatId, topicId: s.topicId },
+      );
+    }
+  }
 }
 
 async function resolveCompanyIdFromChat(ctx: PluginContext, chatId: string): Promise<string> {

@@ -214,7 +214,7 @@ export function formatApprovalCreated(event: PluginEvent, opts?: IssueLinksOpts)
   };
 }
 
-export function formatAgentError(event: PluginEvent, opts?: IssueLinksOpts): FormattedMessage {
+export function formatAgentError(event: PluginEvent, opts?: IssueLinksOpts, opts2?: { enableSessionButton?: boolean }): FormattedMessage {
   const p = event.payload as Payload;
   const agentId = String(p.agentId ?? event.entityId);
   const agentName = String(p.agentName ?? p.name ?? agentId);
@@ -238,33 +238,47 @@ export function formatAgentError(event: PluginEvent, opts?: IssueLinksOpts): For
   }
   lines.push(`\n${code(truncateAtWord(errorMessage, 500))}`);
 
-  const buttons = [
+  const urlButtons = [
     runButton(agentId, runId, opts?.baseUrl),
     issueIdentifier ? issueButton(issueIdentifier, opts) : null,
     agentButton(agentId, "View Agent ↗", opts?.baseUrl),
   ].filter((button): button is { text: string; url: string } => Boolean(button));
 
+  const keyboard: Array<Array<{ text: string; url?: string; callback_data?: string }>> = [];
+  if (urlButtons.length > 0) keyboard.push(urlButtons);
+  if (opts2?.enableSessionButton) {
+    const cbData = runId ? `open_session_${agentId}_${runId}` : `open_session_${agentId}`;
+    keyboard.push([{ text: "🗂 Abrir/Criar Sessão", callback_data: cbData }]);
+  }
+
   return {
     text: lines.join("\n"),
     options: {
       parseMode: "MarkdownV2",
-      ...(buttons.length > 0 ? { inlineKeyboard: [buttons] } : {}),
+      ...(keyboard.length > 0 ? { inlineKeyboard: keyboard } : {}),
     },
   };
 }
 
-export function formatAgentRunStarted(event: PluginEvent, opts?: IssueLinksOpts): FormattedMessage {
+export function formatAgentRunStarted(event: PluginEvent, opts?: IssueLinksOpts, opts2?: { enableSessionButton?: boolean }): FormattedMessage {
   const p = event.payload as Payload;
   const agentId = String(p.agentId ?? event.entityId);
   const agentName = String(p.agentName ?? agentId);
   const runId = p.runId ? String(p.runId) : null;
 
-  const buttons: Array<{ text: string; url: string }> = [];
+  const urlButtons: Array<{ text: string; url: string }> = [];
   if (opts?.baseUrl && isExternalUrl(opts.baseUrl)) {
     const url = runId
       ? `${opts.baseUrl}/agents/${agentId}/runs/${runId}`
       : `${opts.baseUrl}/agents/${agentId}`;
-    buttons.push({ text: "View Run ↗", url });
+    urlButtons.push({ text: "View Run ↗", url });
+  }
+
+  const keyboard: Array<Array<{ text: string; url?: string; callback_data?: string }>> = [];
+  if (urlButtons.length > 0) keyboard.push(urlButtons);
+  if (opts2?.enableSessionButton) {
+    const cbData = runId ? `open_session_${agentId}_${runId}` : `open_session_${agentId}`;
+    keyboard.push([{ text: "🗂 Abrir/Criar Sessão", callback_data: cbData }]);
   }
 
   return {
@@ -272,23 +286,30 @@ export function formatAgentRunStarted(event: PluginEvent, opts?: IssueLinksOpts)
     options: {
       parseMode: "MarkdownV2",
       disableNotification: true,
-      ...(buttons.length > 0 ? { inlineKeyboard: [buttons] } : {}),
+      ...(keyboard.length > 0 ? { inlineKeyboard: keyboard } : {}),
     },
   };
 }
 
-export function formatAgentRunFinished(event: PluginEvent, opts?: IssueLinksOpts): FormattedMessage {
+export function formatAgentRunFinished(event: PluginEvent, opts?: IssueLinksOpts, opts2?: { enableSessionButton?: boolean }): FormattedMessage {
   const p = event.payload as Payload;
   const agentId = String(p.agentId ?? event.entityId);
   const agentName = String(p.agentName ?? agentId);
   const runId = p.runId ? String(p.runId) : null;
 
-  const buttons: Array<{ text: string; url: string }> = [];
+  const urlButtons: Array<{ text: string; url: string }> = [];
   if (opts?.baseUrl && isExternalUrl(opts.baseUrl)) {
     const url = runId
       ? `${opts.baseUrl}/agents/${agentId}/runs/${runId}`
       : `${opts.baseUrl}/agents/${agentId}`;
-    buttons.push({ text: "View Run ↗", url });
+    urlButtons.push({ text: "View Run ↗", url });
+  }
+
+  const keyboard: Array<Array<{ text: string; url?: string; callback_data?: string }>> = [];
+  if (urlButtons.length > 0) keyboard.push(urlButtons);
+  if (opts2?.enableSessionButton) {
+    const cbData = runId ? `open_session_${agentId}_${runId}` : `open_session_${agentId}`;
+    keyboard.push([{ text: "🗂 Abrir/Criar Sessão", callback_data: cbData }]);
   }
 
   return {
@@ -296,7 +317,7 @@ export function formatAgentRunFinished(event: PluginEvent, opts?: IssueLinksOpts
     options: {
       parseMode: "MarkdownV2",
       disableNotification: true,
-      ...(buttons.length > 0 ? { inlineKeyboard: [buttons] } : {}),
+      ...(keyboard.length > 0 ? { inlineKeyboard: keyboard } : {}),
     },
   };
 }

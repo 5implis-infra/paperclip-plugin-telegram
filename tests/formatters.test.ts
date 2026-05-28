@@ -247,3 +247,123 @@ describe("formatAgentRunFinished", () => {
     expect(msg.options.disableNotification).toBe(true);
   });
 });
+
+// --- Session button (Etapa 4.1) ---
+
+describe("formatAgentError — enableSessionButton", () => {
+  const agentId = "550e8400-e29b-41d4-a716-446655440000";
+  const runId = "run-abc123";
+
+  it("adds session button row when enableSessionButton is true", () => {
+    const msg = formatAgentError(
+      mockEvent({ agentId, runId, error: "boom" }),
+      undefined,
+      { enableSessionButton: true },
+    );
+    const keyboard = msg.options.inlineKeyboard!;
+    const sessionRow = keyboard.find((row) => row.some((btn) => "callback_data" in btn && (btn as { callback_data?: string }).callback_data?.startsWith("open_session_")));
+    expect(sessionRow).toBeDefined();
+    expect(sessionRow![0].text).toBe("🗂 Abrir/Criar Sessão");
+  });
+
+  it("callback_data encodes agentId and runId", () => {
+    const msg = formatAgentError(
+      mockEvent({ agentId, runId, error: "boom" }),
+      undefined,
+      { enableSessionButton: true },
+    );
+    const keyboard = msg.options.inlineKeyboard!;
+    const sessionBtn = keyboard.flat().find((btn) => (btn as { callback_data?: string }).callback_data?.startsWith("open_session_")) as { callback_data: string };
+    expect(sessionBtn.callback_data).toBe(`open_session_${agentId}_${runId}`);
+  });
+
+  it("callback_data uses only agentId when runId is absent", () => {
+    const msg = formatAgentError(
+      mockEvent({ agentId, error: "boom" }),
+      undefined,
+      { enableSessionButton: true },
+    );
+    const keyboard = msg.options.inlineKeyboard!;
+    const sessionBtn = keyboard.flat().find((btn) => (btn as { callback_data?: string }).callback_data?.startsWith("open_session_")) as { callback_data: string };
+    expect(sessionBtn.callback_data).toBe(`open_session_${agentId}`);
+  });
+
+  it("session button is in a separate row from URL buttons", () => {
+    const msg = formatAgentError(
+      mockEvent({ agentId, runId, error: "boom" }),
+      { baseUrl: "https://app.example.com", issuePrefix: "PRJ" },
+      { enableSessionButton: true },
+    );
+    const keyboard = msg.options.inlineKeyboard!;
+    expect(keyboard.length).toBeGreaterThanOrEqual(2);
+    const sessionRowIdx = keyboard.findIndex((row) => row.some((btn) => (btn as { callback_data?: string }).callback_data?.startsWith("open_session_")));
+    const urlRowIdx = keyboard.findIndex((row) => row.some((btn) => "url" in btn));
+    expect(sessionRowIdx).not.toBe(urlRowIdx);
+  });
+
+  it("does not add session button when enableSessionButton is false", () => {
+    const msg = formatAgentError(mockEvent({ agentId, error: "boom" }), undefined, { enableSessionButton: false });
+    const hasSessionBtn = msg.options.inlineKeyboard?.flat().some((btn) => (btn as { callback_data?: string }).callback_data?.startsWith("open_session_"));
+    expect(hasSessionBtn).toBeFalsy();
+  });
+
+  it("does not add session button when opts2 is omitted", () => {
+    const msg = formatAgentError(mockEvent({ agentId, error: "boom" }));
+    const hasSessionBtn = msg.options.inlineKeyboard?.flat().some((btn) => (btn as { callback_data?: string }).callback_data?.startsWith("open_session_"));
+    expect(hasSessionBtn).toBeFalsy();
+  });
+});
+
+describe("formatAgentRunStarted — enableSessionButton", () => {
+  const agentId = "550e8400-e29b-41d4-a716-446655440000";
+  const runId = "run-xyz789";
+
+  it("adds session button when enableSessionButton is true", () => {
+    const msg = formatAgentRunStarted(
+      mockEvent({ agentId, agentName: "Builder", runId }),
+      undefined,
+      { enableSessionButton: true },
+    );
+    const sessionBtn = msg.options.inlineKeyboard?.flat().find((btn) => (btn as { callback_data?: string }).callback_data?.startsWith("open_session_")) as { callback_data: string } | undefined;
+    expect(sessionBtn).toBeDefined();
+    expect(sessionBtn!.callback_data).toBe(`open_session_${agentId}_${runId}`);
+  });
+
+  it("session button is in a separate row from View Run button", () => {
+    const msg = formatAgentRunStarted(
+      mockEvent({ agentId, agentName: "Builder", runId }),
+      { baseUrl: "https://app.example.com" },
+      { enableSessionButton: true },
+    );
+    const keyboard = msg.options.inlineKeyboard!;
+    expect(keyboard.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("no session button without enableSessionButton flag", () => {
+    const msg = formatAgentRunStarted(mockEvent({ agentId, agentName: "Builder", runId }));
+    const hasSessionBtn = msg.options.inlineKeyboard?.flat().some((btn) => (btn as { callback_data?: string }).callback_data?.startsWith("open_session_"));
+    expect(hasSessionBtn).toBeFalsy();
+  });
+});
+
+describe("formatAgentRunFinished — enableSessionButton", () => {
+  const agentId = "550e8400-e29b-41d4-a716-446655440000";
+  const runId = "run-done42";
+
+  it("adds session button when enableSessionButton is true", () => {
+    const msg = formatAgentRunFinished(
+      mockEvent({ agentId, agentName: "Builder", runId }),
+      undefined,
+      { enableSessionButton: true },
+    );
+    const sessionBtn = msg.options.inlineKeyboard?.flat().find((btn) => (btn as { callback_data?: string }).callback_data?.startsWith("open_session_")) as { callback_data: string } | undefined;
+    expect(sessionBtn).toBeDefined();
+    expect(sessionBtn!.callback_data).toBe(`open_session_${agentId}_${runId}`);
+  });
+
+  it("no session button without enableSessionButton flag", () => {
+    const msg = formatAgentRunFinished(mockEvent({ agentId, agentName: "Builder", runId }));
+    const hasSessionBtn = msg.options.inlineKeyboard?.flat().some((btn) => (btn as { callback_data?: string }).callback_data?.startsWith("open_session_"));
+    expect(hasSessionBtn).toBeFalsy();
+  });
+});

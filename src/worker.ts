@@ -26,7 +26,7 @@ import {
   formatAgentRunFinished,
   type IssueLinksOpts,
 } from "./formatters.js";
-import { handleCommand, resolveNotificationThreadId, BOT_COMMANDS } from "./commands.js";
+import { handleCommand, resolveNotificationThreadId, BOT_COMMANDS_MENU } from "./commands.js";
 import {
   routeMessageToAgent,
   handleHandoffToolCall,
@@ -34,7 +34,13 @@ import {
   handleHandoffApproval,
   handleHandoffRejection,
   setupAcpOutputListener,
+  buildAgentPickerContent,
+  spawnAgentSessionById,
+  closeSessionById,
+  cancelSessionById,
+  handleOpenSessionCallback,
 } from "./acp-bridge.js";
+import { createIssueWithAgent } from "./commands.js";
 import { handleMediaMessage } from "./media-pipeline.js";
 import {
   getPersistedTelegramUpdateOffset,
@@ -427,7 +433,7 @@ const plugin = definePlugin({
       const companyCfg = await getCompanyConfig(ctx, companyId);
       if (companyCfg?.enableCommands) {
         const allCommands = [
-          ...BOT_COMMANDS,
+          ...BOT_COMMANDS_MENU,
           { command: "commands", description: "Manage custom workflow commands" },
         ];
         setMyCommands(ctx, token, allCommands)
@@ -639,7 +645,7 @@ const plugin = definePlugin({
       const errorMessage = normalizeAgentErrorMessage(payload.error ?? payload.message);
       const dedupeKey = ["agent.run.failed", event.companyId, agentId, errorMessage].join(":");
       if (!agentErrorDedupe(dedupeKey)) return;
-      await notify(event, formatAgentError, cfg.errorsChatId, cfg.errorsTopicId);
+      await notify(event, (e, opts) => formatAgentError(e, opts, { enableSessionButton: true }), cfg.errorsChatId, cfg.errorsTopicId);
     });
 
     const enrichAgentName = async (event: PluginEvent) => {
@@ -653,14 +659,14 @@ const plugin = definePlugin({
       const cfg = await getCompanyConfig(ctx, event.companyId);
       if (!cfg?.notifyOnAgentRunStarted) return;
       await enrichAgentName(event);
-      await notify(event, formatAgentRunStarted);
+      await notify(event, (e, opts) => formatAgentRunStarted(e, opts, { enableSessionButton: true }));
     });
 
     ctx.events.on("agent.run.finished", async (event: PluginEvent) => {
       const cfg = await getCompanyConfig(ctx, event.companyId);
       if (!cfg?.notifyOnAgentRunFinished) return;
       await enrichAgentName(event);
-      await notify(event, formatAgentRunFinished);
+      await notify(event, (e, opts) => formatAgentRunFinished(e, opts, { enableSessionButton: true }));
     });
 
     ctx.data.register("chat-mapping", async (params) => {
@@ -1001,7 +1007,8 @@ async function handleUpdate(
     if (handledCustom) return;
 
     const boardApiToken = command === "approve" ? await resolveBoardApiToken(ctx, companyCfg, companyId) : undefined;
-    await handleCommand(ctx, token, chatId, command, args, threadId, baseUrl, publicUrl, companyId, boardApiToken, companyCfg.maxAgentsPerThread);
+    const userId = msg.from?.id ? String(msg.from.id) : undefined;
+    await handleCommand(ctx, token, chatId, command, args, threadId, baseUrl, publicUrl, companyId, boardApiToken, companyCfg.maxAgentsPerThread, userId);
     return;
   }
 
@@ -1108,6 +1115,116 @@ async function handleCallbackQuery(
     const handoffId = data.replace("handoff_reject_", "");
     await handleHandoffRejection(ctx, token, handoffId, actor, query.id, chatId, messageId);
     await answerCallbackQuery(ctx, token, query.id, "Handoff rejected");
+    return;
+  }
+
+  // --- Agent picker: /acp spawn ---
+  if (data.startsWith("acp_spawn_sel_")) {
+    const agentId = data.slice("acp_spawn_sel_".length);
+    if (!chatId) { await answerCallbackQuery(ctx, token, query.id, "Contexto inválido."); return; }
+    const pickerCtx = await ctx.state.get({ scopeKind: "instance", stateKey: `picker_ctx_${chatId}_acp_spawn` }) as { messageThreadId?: number; companyId?: string } | null;
+    const companyId = pickerCtx?.companyId ?? await resolveCompanyId(ctx, chatId);
+    await answerCallbackQuery(ctx, token, query.id, "Iniciando sessão...");
+    await spawnAgentSessionById(ctx, token, chatId, agentId, companyId, pickerCtx?.messageThreadId);
+    return;
+  }
+
+  if (data.startsWith("acp_spawn_page_") || data.startsWith("acp_spawn_all_")) {
+    if (!chatId || !messageId) { await answerCallbackQuery(ctx, token, query.id, "Contexto inválido."); return; }
+    const isAll = data.startsWith("acp_spawn_all_");
+    const page = parseInt(data.split("_").pop() ?? "0", 10);
+    const pickerCtx = await ctx.state.get({ scopeKind: "instance", stateKey: `picker_ctx_${chatId}_acp_spawn` }) as { companyId?: string } | null;
+    const companyId = pickerCtx?.companyId ?? await resolveCompanyId(ctx, chatId);
+    const { text, keyboard } = await buildAgentPickerContent(ctx, companyId, { page, showAll: isAll, callbackPrefix: "acp_spawn" });
+    await editMessage(ctx, token, chatId, messageId, text, { inlineKeyboard: keyboard });
+    await answerCallbackQuery(ctx, token, query.id, "");
+    return;
+  }
+
+  // --- Agent picker: /create issue ---
+  if (data.startsWith("create_issue_sel_")) {
+    const agentId = data.slice("create_issue_sel_".length);
+    if (!chatId) { await answerCallbackQuery(ctx, token, query.id, "Contexto inválido."); return; }
+    const pendingKey = `create_pending_${chatId}_${query.from.id}`;
+    const pending = await ctx.state.get({ scopeKind: "instance", stateKey: pendingKey }) as { text: string; messageThreadId?: number; linkBaseUrl?: string; companyId?: string } | null
+      ?? await ctx.state.get({ scopeKind: "instance", stateKey: `create_pending_${chatId}` }) as { text: string; messageThreadId?: number; linkBaseUrl?: string; companyId?: string } | null;
+
+    if (!pending) { await answerCallbackQuery(ctx, token, query.id, "Sessão expirada. Use /create novamente."); return; }
+
+    const companyId = pending.companyId ?? await resolveCompanyId(ctx, chatId);
+    const allAgents = await ctx.agents.list({ companyId }) as Array<{ id?: string; agentId?: string; _id?: string; name?: string }>;
+    const agent = allAgents.find((a) => String(a.agentId ?? a._id ?? a.id ?? "") === agentId);
+    const agentName = agent?.name ?? agentId;
+
+    const title = pending.text.match(/^[^.!?\n]{1,120}[.!?\n]?/)?.[0]?.trim() ?? pending.text.slice(0, 120).trim();
+    const description = pending.text.length > title.length ? pending.text.slice(title.length).trim() : undefined;
+
+    await ctx.state.set({ scopeKind: "instance", stateKey: pendingKey }, null);
+    await answerCallbackQuery(ctx, token, query.id, "Criando task...");
+    await createIssueWithAgent(ctx, token, chatId, companyId, agentId, agentName, title, description, pending.messageThreadId, pending.linkBaseUrl);
+    return;
+  }
+
+  if (data.startsWith("create_issue_page_") || data.startsWith("create_issue_all_")) {
+    if (!chatId || !messageId) { await answerCallbackQuery(ctx, token, query.id, "Contexto inválido."); return; }
+    const isAll = data.startsWith("create_issue_all_");
+    const page = parseInt(data.split("_").pop() ?? "0", 10);
+    const pickerCtx = await ctx.state.get({ scopeKind: "instance", stateKey: `picker_ctx_${chatId}_create_issue` }) as { companyId?: string } | null;
+    const companyId = pickerCtx?.companyId ?? await resolveCompanyId(ctx, chatId);
+    const { text, keyboard } = await buildAgentPickerContent(ctx, companyId, { page, showAll: isAll, callbackPrefix: "create_issue" });
+    await editMessage(ctx, token, chatId, messageId, text, { inlineKeyboard: keyboard });
+    await answerCallbackQuery(ctx, token, query.id, "");
+    return;
+  }
+
+  // --- Session close / cancel from /status buttons ---
+  if (data.startsWith("acp_close_")) {
+    const sessionId = data.slice("acp_close_".length);
+    if (!chatId) { await answerCallbackQuery(ctx, token, query.id, "Contexto inválido."); return; }
+    const companyId = await resolveCompanyId(ctx, chatId);
+    const ok = await closeSessionById(ctx, token, sessionId, companyId);
+    await answerCallbackQuery(ctx, token, query.id, ok ? "Sessão encerrada." : "Sessão não encontrada.");
+    return;
+  }
+
+  if (data.startsWith("acp_cancel_")) {
+    const sessionId = data.slice("acp_cancel_".length);
+    if (!chatId) { await answerCallbackQuery(ctx, token, query.id, "Contexto inválido."); return; }
+    const companyId = await resolveCompanyId(ctx, chatId);
+    const ok = await cancelSessionById(ctx, companyId, sessionId);
+    await answerCallbackQuery(ctx, token, query.id, ok ? "Cancelamento solicitado." : "Sessão não encontrada.");
+    return;
+  }
+
+  // --- Botão "Abrir/Criar Sessão" em mensagens de agent run ---
+  if (data.startsWith("open_session_")) {
+    if (!chatId) { await answerCallbackQuery(ctx, token, query.id, "Contexto inválido."); return; }
+
+    const rest = data.slice("open_session_".length);
+    let agentId: string;
+    let runId: string | undefined;
+
+    // agentId is a UUID (exactly 36 chars); runId follows after "_" separator if present
+    if (rest.length > 36 && rest[36] === "_") {
+      agentId = rest.slice(0, 36);
+      runId = rest.slice(37) || undefined;
+    } else {
+      agentId = rest;
+      runId = undefined;
+    }
+
+    const result = await handleOpenSessionCallback(ctx, token, chatId, agentId, runId);
+
+    if (result.status === "existing") {
+      const chatNumericId = result.existingChatId.replace(/^-100/, "");
+      const topicLink = `https://t.me/c/${chatNumericId}/${result.topicId}`;
+      await answerCallbackQuery(ctx, token, query.id, "Sessão já existe.");
+      await sendMessage(ctx, token, chatId, `🗂 Sessão já criada. <a href="${topicLink}">Abrir tópico</a>`, { parseMode: "HTML" });
+    } else if (result.status === "created") {
+      await answerCallbackQuery(ctx, token, query.id, "Sessão criada!");
+    } else {
+      await answerCallbackQuery(ctx, token, query.id, "Erro ao criar sessão.");
+    }
     return;
   }
 

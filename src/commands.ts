@@ -1,8 +1,9 @@
 import type { PluginContext, PluginEvent, Agent, Issue, Project } from "@paperclipai/plugin-sdk";
 import { sendMessage, escapeMarkdownV2, sendChatAction } from "./telegram-api.js";
 import { METRIC_NAMES } from "./constants.js";
-import { handleAcpCommand } from "./acp-bridge.js";
+import { handleAcpCommand, getSessions, buildAgentPickerContent, sendAgentPickerPage, resolveAgentByName } from "./acp-bridge.js";
 import { buildPaperclipAuthHeaders, fetchPaperclipApi } from "./paperclip-api.js";
+import { resolveMappedProjectIdForTopic } from "./topic-projects.js";
 
 type BotCommand = {
   command: string;
@@ -25,12 +26,16 @@ export const BOT_COMMANDS: BotCommand[] = [
   { command: "agents", description: "List agents with current status" },
   { command: "approve", description: "Approve a pending request by ID" },
   { command: "help", description: "Show available commands" },
-  { command: "connect", description: "Link this chat to a Paperclip company" },
-  { command: "connect_topic", description: "Map a project to a forum topic" },
+  { command: "connect", description: "Map a project to a forum topic" },
   { command: "topics", description: "List or remove forum topic mappings" },
   { command: "acp", description: "Manage agent sessions (spawn, status, cancel, close)" },
   { command: "commands", description: "Manage custom workflow commands (list, import, run, delete)" },
 ];
+
+// Menu shown in Telegram autocomplete (/) — excludes /approve (use button) and internal-only commands
+export const BOT_COMMANDS_MENU: BotCommand[] = BOT_COMMANDS.filter(
+  (c) => c.command !== "approve",
+);
 
 export async function handleCommand(
   ctx: PluginContext,
@@ -44,15 +49,16 @@ export async function handleCommand(
   companyId?: string,
   boardApiToken?: string,
   maxAgentsPerThread?: number,
+  userId?: string,
 ): Promise<void> {
   await ctx.metrics.write(METRIC_NAMES.commandsHandled, 1);
 
   switch (command) {
     case "create":
-      await handleCreate(ctx, token, chatId, args, messageThreadId, publicUrl || baseUrl, companyId);
+      await handleCreate(ctx, token, chatId, args, messageThreadId, publicUrl || baseUrl, companyId, userId);
       break;
     case "status":
-      await handleStatus(ctx, token, chatId, messageThreadId, publicUrl, companyId);
+      await handleStatus(ctx, token, chatId, messageThreadId, publicUrl, companyId, baseUrl);
       break;
     case "issues":
       await handleIssues(ctx, token, chatId, args, messageThreadId, publicUrl || baseUrl, companyId);
@@ -68,9 +74,6 @@ export async function handleCommand(
       break;
     case "connect":
       await handleConnect(ctx, token, chatId, args, messageThreadId);
-      break;
-    case "connect_topic":
-      await handleConnectTopic(ctx, token, chatId, args, messageThreadId);
       break;
     case "topics":
       await handleTopicsCommand(ctx, token, chatId, args, messageThreadId);
@@ -96,11 +99,34 @@ async function handleStatus(
   messageThreadId?: number,
   publicUrl?: string,
   resolvedCompanyId?: string,
+  baseUrl?: string,
 ): Promise<void> {
   await sendChatAction(ctx, token, chatId);
 
+  const companyId = resolvedCompanyId ?? await resolveCompanyId(ctx, chatId);
+
+  // Branch c — session topic (priority)
+  if (messageThreadId) {
+    const sessions = await getSessions(ctx, chatId, messageThreadId);
+    const activeSessions = sessions.filter((s) => s.status === "active");
+    if (activeSessions.length > 0) {
+      await handleStatusSessionBranch(ctx, token, chatId, messageThreadId, companyId, activeSessions, publicUrl, baseUrl);
+      return;
+    }
+  }
+
+  // Branch b — project topic
+  if (messageThreadId) {
+    const topicMap = await getTopicMap(ctx, chatId);
+    const topicEntry = findTopicMapEntryByThreadId(topicMap, messageThreadId);
+    if (topicEntry) {
+      await handleStatusProjectBranch(ctx, token, chatId, messageThreadId, companyId, topicEntry, publicUrl);
+      return;
+    }
+  }
+
+  // Branch a — general (default behavior)
   try {
-    const companyId = resolvedCompanyId ?? await resolveCompanyId(ctx, chatId);
     const agents = await ctx.agents.list({ companyId });
     const activeAgents = agents.filter((a: Agent) => a.status === "active");
     const issues = await ctx.issues.list({ companyId, limit: 10 });
@@ -130,6 +156,144 @@ async function handleStatus(
   }
 }
 
+async function handleStatusSessionBranch(
+  ctx: PluginContext,
+  token: string,
+  chatId: string,
+  messageThreadId: number,
+  companyId: string,
+  activeSessions: import("./acp-bridge.js").ChatSession[],
+  publicUrl?: string,
+  baseUrl?: string,
+): Promise<void> {
+  const hasPublicUrl = isExternalUrl(publicUrl);
+  const apiBase = baseUrl ?? publicUrl;
+  const chatNumericId = chatId.replace(/^-100/, "");
+  const topicLink = `https://t.me/c/${chatNumericId}/${messageThreadId}`;
+
+  const allAgents = await ctx.agents.list({ companyId }).catch(() => [] as Agent[]);
+
+  for (const session of activeSessions) {
+    const lines: string[] = [
+      escapeMarkdownV2("🔌") + " *Session Status*",
+      "",
+      `Session: \`${escapeMarkdownV2(session.sessionId)}\``,
+      `Transport: ${escapeMarkdownV2(session.transport)}`,
+      `Status: ${escapeMarkdownV2(session.status)}`,
+      `Started: ${escapeMarkdownV2(session.spawnedAt)}`,
+      `Last active: ${escapeMarkdownV2(session.lastActivityAt)}`,
+      `Topic: [Session \\#${escapeMarkdownV2(String(messageThreadId))}](${topicLink})`,
+    ];
+
+    // Agent info
+    const agentEntry = session.agentId
+      ? (allAgents as Agent[]).find((a) => a.id === session.agentId)
+      : undefined;
+    if (agentEntry) {
+      lines.push(`Agent: *${escapeMarkdownV2(agentEntry.name)}* \\— ${escapeMarkdownV2(agentEntry.status)}`);
+    } else if (session.agentName) {
+      lines.push(`Agent: *${escapeMarkdownV2(session.agentDisplayName ?? session.agentName)}*`);
+    }
+
+    // Runs
+    let latestRunId: string | undefined;
+    if (session.agentId && apiBase) {
+      try {
+        const runsRes = await fetchPaperclipApi(ctx, `${apiBase}/api/agents/${session.agentId}/runs?limit=3`);
+        const runsData = await runsRes.json() as { runs?: Array<{ id: string; status: string; createdAt?: string; startedAt?: string }> };
+        const runs = runsData.runs ?? [];
+        if (runs.length > 0) {
+          latestRunId = runs[0]!.id;
+          lines.push("", "Recent runs:");
+          for (const run of runs) {
+            const ts = run.createdAt ?? run.startedAt ?? "";
+            const date = ts ? ts.slice(0, 10) : "";
+            lines.push(`  • \`${escapeMarkdownV2(run.id.slice(0, 8))}\` \\— ${escapeMarkdownV2(run.status)}${date ? ` \\— ${escapeMarkdownV2(date)}` : ""}`);
+          }
+        }
+      } catch { /* best effort */ }
+    }
+
+    // Correlated issue
+    let lastIssue: Issue | null = null;
+    try {
+      const lastIssueId = await ctx.state.get({ scopeKind: "instance", stateKey: `session_last_issue_${session.sessionId}` }) as string | null;
+      if (lastIssueId) {
+        lastIssue = await ctx.issues.get(lastIssueId, companyId);
+        if (lastIssue) {
+          const id = lastIssue.identifier ?? lastIssue.id;
+          lines.push(`Issue: ${escapeMarkdownV2(id)} \\— ${escapeMarkdownV2(lastIssue.title)}`);
+        }
+      }
+    } catch { /* best effort */ }
+
+    // Buttons
+    const buttons: Array<{ text: string; url?: string; callback_data?: string }> = [];
+    if (hasPublicUrl && session.agentId) buttons.push({ text: "View Agent ↗", url: `${publicUrl}/agents/${session.agentId}` });
+    if (hasPublicUrl && latestRunId) buttons.push({ text: "View Run ↗", url: `${publicUrl}/runs/${latestRunId}` });
+    if (hasPublicUrl && lastIssue) {
+      const id = lastIssue.identifier ?? lastIssue.id;
+      buttons.push({ text: "Open Issue ↗", url: `${publicUrl}/issues/${id}` });
+    }
+    const actionButtons: Array<{ text: string; callback_data: string }> = [
+      { text: "Close Session", callback_data: `acp_close_${session.sessionId}` },
+    ];
+    if (latestRunId) actionButtons.push({ text: "Cancel", callback_data: `acp_cancel_${session.sessionId}` });
+
+    const inlineKeyboard: Array<Array<{ text: string; url?: string; callback_data?: string }>> = [];
+    if (buttons.length > 0) inlineKeyboard.push(buttons);
+    inlineKeyboard.push(actionButtons);
+
+    await sendMessage(ctx, token, chatId, lines.join("\n"), {
+      parseMode: "MarkdownV2",
+      messageThreadId,
+      inlineKeyboard,
+    });
+  }
+}
+
+async function handleStatusProjectBranch(
+  ctx: PluginContext,
+  token: string,
+  chatId: string,
+  messageThreadId: number,
+  companyId: string,
+  topicEntry: { projectName: string; projectId?: string },
+  publicUrl?: string,
+): Promise<void> {
+  try {
+    const agents = await ctx.agents.list({ companyId });
+    const activeAgents = agents.filter((a: Agent) => a.status === "active");
+    const allIssues = await ctx.issues.list({ companyId, limit: 50 });
+    const issues = allIssues.filter((i: Issue) => {
+      const proj = (i as unknown as Record<string, unknown>).project as { name?: string; id?: string } | undefined;
+      const pid = (i as unknown as Record<string, unknown>).projectId as string | undefined;
+      if (topicEntry.projectId) return pid === topicEntry.projectId || proj?.id === topicEntry.projectId;
+      return proj?.name?.toLowerCase() === topicEntry.projectName.toLowerCase();
+    });
+    const doneIssues = issues.filter((i: Issue) => i.status === "done");
+
+    const lines = [
+      escapeMarkdownV2("📊") + ` *Status \\— ${escapeMarkdownV2(topicEntry.projectName)}*`,
+      "",
+      `${escapeMarkdownV2("🤖")} Active agents: *${activeAgents.length}*/${escapeMarkdownV2(String(agents.length))}`,
+      `${escapeMarkdownV2("📋")} Issues: *${escapeMarkdownV2(String(issues.length))}* \\(${escapeMarkdownV2(String(doneIssues.length))} done\\)`,
+    ];
+
+    const inlineKeyboard = isExternalUrl(publicUrl)
+      ? [[{ text: "Open Dashboard ↗", url: publicUrl! }]]
+      : undefined;
+
+    await sendMessage(ctx, token, chatId, lines.join("\n"), {
+      parseMode: "MarkdownV2",
+      messageThreadId,
+      inlineKeyboard,
+    });
+  } catch {
+    await sendMessage(ctx, token, chatId, `Could not fetch status for project "${topicEntry.projectName}".`, { messageThreadId });
+  }
+}
+
 async function handleIssues(
   ctx: PluginContext,
   token: string,
@@ -143,24 +307,54 @@ async function handleIssues(
 
   try {
     const companyId = resolvedCompanyId ?? await resolveCompanyId(ctx, chatId);
+
+    // Branch b — auto-detect project from topic mapping
+    let autoProjectName: string | undefined;
+    let autoProjectId: string | undefined;
+    if (messageThreadId) {
+      const topicMap = await getTopicMap(ctx, chatId);
+      const entry = findTopicMapEntryByThreadId(topicMap, messageThreadId);
+      if (entry) {
+        autoProjectName = entry.projectName;
+        autoProjectId = entry.projectId;
+      }
+    }
+
     const company = await ctx.companies.get(companyId);
-    const issues = await ctx.issues.list({ companyId, limit: 10 });
-    const filtered = projectFilter
-      ? issues.filter((i: Issue) => {
-          const projName = i.project?.name ?? "";
-          return projName.toLowerCase().includes(projectFilter.toLowerCase());
-        })
-      : issues;
+    const issues = await ctx.issues.list({ companyId, limit: 50 });
+
+    let filtered: Issue[];
+    let headerProject: string | undefined;
+    if (autoProjectName) {
+      headerProject = autoProjectName;
+      filtered = issues.filter((i: Issue) => {
+        const proj = (i as unknown as Record<string, unknown>).project as { name?: string; id?: string } | undefined;
+        const pid = (i as unknown as Record<string, unknown>).projectId as string | undefined;
+        if (autoProjectId) return pid === autoProjectId || proj?.id === autoProjectId;
+        return proj?.name?.toLowerCase() === autoProjectName!.toLowerCase();
+      });
+    } else {
+      filtered = projectFilter
+        ? issues.filter((i: Issue) => {
+            const projName = i.project?.name ?? "";
+            return projName.toLowerCase().includes(projectFilter.toLowerCase());
+          })
+        : issues;
+    }
 
     if (filtered.length === 0) {
-      const filter = projectFilter ? ` for project "${projectFilter}"` : "";
+      const label = headerProject ?? projectFilter;
+      const filter = label ? ` for project "${label}"` : "";
       await sendMessage(ctx, token, chatId, `No issues found${filter}.`, { messageThreadId });
       return;
     }
 
     const issuePrefix = company?.issuePrefix;
     const statusEmoji: Record<string, string> = { done: "✅", todo: "📋", in_progress: "🔄", backlog: "📥" };
-    const lines = [escapeMarkdownV2("📋") + " *Open Issues*", ""];
+    const header = headerProject
+      ? escapeMarkdownV2("📋") + ` *Issues \\— ${escapeMarkdownV2(headerProject)}*`
+      : escapeMarkdownV2("📋") + " *Open Issues*";
+    const lines = [header, ""];
     for (const issue of filtered) {
       const emoji = statusEmoji[issue.status] ?? "📋";
       const id = issue.identifier ?? issue.id;
@@ -243,9 +437,13 @@ async function handleApprove(
   boardApiToken?: string,
 ): Promise<void> {
   if (!approvalId.trim()) {
-    await sendMessage(ctx, token, chatId, "Usage: /approve <approval-id>", {
-      messageThreadId,
-    });
+    await sendMessage(
+      ctx,
+      token,
+      chatId,
+      "Para aprovar, use o botão *Approve* na mensagem de pedido de aprovação, ou responda diretamente a ela com `/approve`\\.",
+      { parseMode: "MarkdownV2", messageThreadId },
+    );
     return;
   }
 
@@ -305,71 +503,10 @@ async function handleConnect(
   ctx: PluginContext,
   token: string,
   chatId: string,
-  companyArg: string,
+  args: string,
   messageThreadId?: number,
 ): Promise<void> {
-  if (!companyArg.trim()) {
-    try {
-      const companies = await ctx.companies.list();
-      const names = companies.map((c) => c.name || c.id).join(", ");
-      await sendMessage(ctx, token, chatId, `Usage: /connect <company-name>\nAvailable: ${names || "none"}`, { messageThreadId });
-    } catch {
-      await sendMessage(ctx, token, chatId, "Usage: /connect <company-name>", { messageThreadId });
-    }
-    return;
-  }
-
-  try {
-    const input = companyArg.trim();
-    const companies = await ctx.companies.list();
-    const match = companies.find(
-      (c) =>
-        c.id === input ||
-        c.name?.toLowerCase() === input.toLowerCase(),
-    );
-
-    if (!match) {
-      const names = companies.map((c) => c.name || c.id).join(", ");
-      await sendMessage(
-        ctx,
-        token,
-        chatId,
-        `Company "${input}" not found. Available: ${names || "none"}`,
-        { messageThreadId },
-      );
-      return;
-    }
-
-    // Inbound: chat → company (for commands like /status)
-    await ctx.state.set(
-      { scopeKind: "instance", stateKey: `chat_${chatId}` },
-      { companyId: match.id, companyName: match.name ?? input, linkedAt: new Date().toISOString() },
-    );
-
-    // Outbound: company → chat (for notifications)
-    await ctx.state.set(
-      { scopeKind: "company", scopeId: match.id, stateKey: "telegram-chat" },
-      chatId,
-    );
-
-    await sendMessage(
-      ctx,
-      token,
-      chatId,
-      `${escapeMarkdownV2("🔗")} ${escapeMarkdownV2("Linked this chat to company:")} *${escapeMarkdownV2(match.name ?? input)}*`,
-      { parseMode: "MarkdownV2", messageThreadId },
-    );
-
-    ctx.logger.info("Chat linked to company", { chatId, companyId: match.id, companyName: match.name });
-  } catch (err) {
-    await sendMessage(
-      ctx,
-      token,
-      chatId,
-      `Failed to connect: ${err instanceof Error ? err.message : String(err)}`,
-      { messageThreadId },
-    );
-  }
+  await handleConnectTopic(ctx, token, chatId, args, messageThreadId, "connect");
 }
 
 async function handleCreate(
@@ -380,64 +517,107 @@ async function handleCreate(
   messageThreadId?: number,
   linkBaseUrl?: string,
   resolvedCompanyId?: string,
+  userId?: string,
 ): Promise<void> {
-  const title = titleArg.trim();
-  if (!title) {
+  const trimmed = titleArg.trim();
+  if (!trimmed) {
     await sendMessage(ctx, token, chatId, "Usage: /create <task title>", { messageThreadId });
     return;
   }
 
   await sendChatAction(ctx, token, chatId);
 
+  const companyId = resolvedCompanyId ?? await resolveCompanyId(ctx, chatId);
+
+  // Parse @agent prefix
+  const parts = trimmed.split(/\s+/);
+  let agentRef: string | undefined;
+  let promptText: string;
+  if (parts[0]?.startsWith("@")) {
+    agentRef = parts[0].slice(1);
+    promptText = parts.slice(1).join(" ");
+  } else {
+    promptText = trimmed;
+  }
+
+  // No agent specified — show picker and save pending text
+  if (!agentRef) {
+    const pendingKey = `create_pending_${chatId}${userId ? `_${userId}` : ""}`;
+    await ctx.state.set(
+      { scopeKind: "instance", stateKey: pendingKey },
+      { text: promptText, messageThreadId, linkBaseUrl, companyId },
+    );
+    await sendAgentPickerPage(ctx, token, chatId, companyId, {
+      page: 0,
+      showAll: false,
+      callbackPrefix: "create_issue",
+      messageThreadId,
+    });
+    return;
+  }
+
+  // Agent specified via @mention
   try {
-    const companyId = resolvedCompanyId ?? await resolveCompanyId(ctx, chatId);
-    const company = await ctx.companies.get(companyId);
-    const issuePrefix = company?.issuePrefix;
-    const projectId = await resolveProjectIdForTopic(ctx, chatId, companyId, messageThreadId);
-
-    // Find the CEO agent to assign to
-    const agents = await ctx.agents.list({ companyId });
-    const ceo = agents.find((a: Agent) => a.role === "ceo" && a.status !== "paused" && a.status !== "error");
-
-    // Create the issue WITHOUT assignee first, then update with both status and assignee.
-    // This ordering is load-bearing: the issue_assigned wake only fires when the assignee
-    // *transitions* from null to an agent. If we set the assignee at creation time, there's
-    // no transition and the agent never gets woken.
-    let issue = await ctx.issues.create({ companyId, title, ...(projectId ? { projectId } : {}) });
-    if (ceo) {
-      issue = await ctx.issues.update(
-        issue.id,
-        { status: "todo", assigneeAgentId: ceo.id },
-        companyId,
-      );
-    } else {
-      // No CEO to assign to — still bump status to todo so it's visible in the backlog
-      issue = await ctx.issues.update(issue.id, { status: "todo" }, companyId);
+    const resolved = await resolveAgentByName(ctx, agentRef, companyId);
+    if (!resolved) {
+      const agents = await ctx.agents.list({ companyId }) as Agent[];
+      const names = agents.map((a) => a.name).filter(Boolean).join(", ");
+      await sendMessage(ctx, token, chatId, `Agent "@${agentRef}" not found. Available: ${names || "none"}`, { messageThreadId });
+      return;
     }
 
-    const id = issue.identifier ?? issue.id;
-    const hasLink = linkBaseUrl && isExternalUrl(linkBaseUrl) && issuePrefix;
-    const idText = hasLink
-      ? `[${escapeMarkdownV2(id)}](${linkBaseUrl}/${issuePrefix}/issues/${id})`
-      : `\`${escapeMarkdownV2(id)}\``;
-    const assigneeText = ceo ? ` ${escapeMarkdownV2("→")} *${escapeMarkdownV2(ceo.name)}*` : "";
+    const title = extractTitle(promptText);
+    const description = promptText.length > title.length ? promptText.slice(title.length).trim() : undefined;
 
-    await sendMessage(
-      ctx,
-      token,
-      chatId,
-      `${escapeMarkdownV2("✅")} *Task created*: ${idText}${assigneeText}\n${escapeMarkdownV2(title)}`,
-      { parseMode: "MarkdownV2", messageThreadId },
-    );
+    await createIssueWithAgent(ctx, token, chatId, companyId, resolved.id, resolved.name, title, description, messageThreadId, linkBaseUrl);
   } catch (err) {
-    await sendMessage(
-      ctx,
-      token,
-      chatId,
-      `Failed to create task: ${err instanceof Error ? err.message : String(err)}`,
-      { messageThreadId },
-    );
+    await sendMessage(ctx, token, chatId, `Failed to create task: ${err instanceof Error ? err.message : String(err)}`, { messageThreadId });
   }
+}
+
+function extractTitle(text: string): string {
+  const match = text.match(/^[^.!?\n]{1,120}[.!?\n]?/);
+  const candidate = match ? match[0]!.trim() : text.slice(0, 120).trim();
+  return candidate || text.slice(0, 120).trim();
+}
+
+export async function createIssueWithAgent(
+  ctx: PluginContext,
+  token: string,
+  chatId: string,
+  companyId: string,
+  agentId: string,
+  agentName: string,
+  title: string,
+  description: string | undefined,
+  messageThreadId?: number,
+  linkBaseUrl?: string,
+): Promise<void> {
+  const company = await ctx.companies.get(companyId);
+  const issuePrefix = company?.issuePrefix;
+  const projectId = await resolveProjectIdForTopic(ctx, chatId, companyId, messageThreadId);
+
+  let issue = await ctx.issues.create({
+    companyId,
+    title,
+    ...(description ? { description } : {}),
+    ...(projectId ? { projectId } : {}),
+  });
+  issue = await ctx.issues.update(issue.id, { status: "todo", assigneeAgentId: agentId }, companyId);
+
+  const id = issue.identifier ?? issue.id;
+  const hasLink = linkBaseUrl && isExternalUrl(linkBaseUrl) && issuePrefix;
+  const idText = hasLink
+    ? `[${escapeMarkdownV2(id)}](${linkBaseUrl}/${issuePrefix}/issues/${id})`
+    : `\`${escapeMarkdownV2(id)}\``;
+
+  await sendMessage(
+    ctx,
+    token,
+    chatId,
+    `${escapeMarkdownV2("✅")} *Task created*: ${idText} ${escapeMarkdownV2("→")} *${escapeMarkdownV2(agentName)}*\n${escapeMarkdownV2(title)}`,
+    { parseMode: "MarkdownV2", messageThreadId },
+  );
 }
 
 export async function handleConnectTopic(
@@ -446,10 +626,14 @@ export async function handleConnectTopic(
   chatId: string,
   args: string,
   messageThreadId?: number,
+  commandName = "connect_topic",
 ): Promise<void> {
+  const escapedCmd = commandName.replace(/_/g, "\\_");
+  const usageMsg = `Usage: /${escapedCmd} <project\\-name> \\[topic\\-id\\]`;
+
   const trimmedArgs = args.trim();
   if (!trimmedArgs) {
-    await sendMessage(ctx, token, chatId, "Usage: /connect\\_topic <project\\-name> \\[topic\\-id\\]", {
+    await sendMessage(ctx, token, chatId, usageMsg, {
       parseMode: "MarkdownV2",
       messageThreadId,
     });
@@ -458,7 +642,7 @@ export async function handleConnectTopic(
 
   const parts = trimmedArgs.split(/\s+/);
   if (parts.length < 2 && !messageThreadId) {
-    await sendMessage(ctx, token, chatId, "Usage: /connect\\_topic <project\\-name> \\[topic\\-id\\]", {
+    await sendMessage(ctx, token, chatId, usageMsg, {
       parseMode: "MarkdownV2",
       messageThreadId,
     });
@@ -473,7 +657,7 @@ export async function handleConnectTopic(
     projectNameInput = parts.join(" ");
   } else {
     if (!messageThreadId) {
-      await sendMessage(ctx, token, chatId, "Usage: /connect\\_topic <project\\-name> \\[topic\\-id\\]", {
+      await sendMessage(ctx, token, chatId, usageMsg, {
         parseMode: "MarkdownV2",
         messageThreadId,
       });
@@ -665,6 +849,20 @@ async function sendProjectNotFoundMessage(
   } catch {
     await sendMessage(ctx, token, chatId, `Project "${projectName.trim()}" not found.`, { messageThreadId });
   }
+}
+
+function findTopicMapEntryByThreadId(
+  topicMap: TopicMap,
+  messageThreadId: number,
+): { projectName: string; projectId?: string } | undefined {
+  const topicId = String(messageThreadId);
+  for (const [key, value] of Object.entries(topicMap)) {
+    const mapping = normalizeTopicMapping(key, value);
+    if (mapping.topicId === topicId) {
+      return { projectName: mapping.projectName, projectId: mapping.projectId };
+    }
+  }
+  return undefined;
 }
 
 async function getTopicMap(ctx: PluginContext, chatId: string): Promise<TopicMap> {
