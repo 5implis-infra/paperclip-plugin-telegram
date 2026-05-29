@@ -432,10 +432,7 @@ const plugin = definePlugin({
 
       const companyCfg = await getCompanyConfig(ctx, companyId);
       if (companyCfg?.enableCommands) {
-        const allCommands = [
-          ...BOT_COMMANDS_MENU,
-          { command: "commands", description: "Manage custom workflow commands" },
-        ];
+        const allCommands = [...BOT_COMMANDS_MENU];
         Promise.all([
           setMyCommands(ctx, token, allCommands),
           setMyCommands(ctx, token, allCommands, { type: "all_group_chats" }),
@@ -462,7 +459,7 @@ const plugin = definePlugin({
       const enabledCompanyIds: string[] = [];
       for (const company of companies) {
         const companyCfg = await getCompanyConfig(ctx, company.id);
-        if (!companyCfg) return;
+        if (!companyCfg) continue;
         if (companyHasToken(companyCfg)) {
           enabledCompanyIds.push(company.id);
           const existing = pollingRegistry.get(company.id);
@@ -696,7 +693,7 @@ const plugin = definePlugin({
       const companies = await ctx.companies.list();
       for (const company of companies) {
         const companyCfg = await getCompanyConfig(ctx, company.id);
-        if (!companyCfg) return;
+        if (!companyCfg) continue;
         if (!companyHasToken(companyCfg)) continue;
         const effectiveDigestMode = companyCfg.digestMode;
         if (effectiveDigestMode === "off") continue;
@@ -893,7 +890,7 @@ const plugin = definePlugin({
       const companies = await ctx.companies.list();
       for (const company of companies) {
         const companyCfg = await getCompanyConfig(ctx, company.id);
-        if (!companyCfg) return;
+        if (!companyCfg) continue;
         if (!companyHasToken(companyCfg)) continue;
         try {
           await escalationManager.checkTimeouts(ctx, companyCfg.telegramBotToken);
@@ -907,7 +904,7 @@ const plugin = definePlugin({
       const companies = await ctx.companies.list();
       for (const company of companies) {
         const companyCfg = await getCompanyConfig(ctx, company.id);
-        if (!companyCfg) return;
+        if (!companyCfg) continue;
         if (!companyHasToken(companyCfg)) continue;
         try {
           await checkWatches(ctx, companyCfg.telegramBotToken, {

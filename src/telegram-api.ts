@@ -157,7 +157,10 @@ export async function setMyCommands(
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ commands, ...(scope ? { scope } : {}) }),
     });
-    const data = (await res.json()) as { ok: boolean };
+    const data = (await res.json()) as { ok: boolean; description?: string };
+    if (!data.ok) {
+      ctx.logger.error("Telegram setMyCommands rejected", { description: data.description });
+    }
     return data.ok;
   } catch (err) {
     ctx.logger.error("Telegram setMyCommands failed", { error: String(err) });
